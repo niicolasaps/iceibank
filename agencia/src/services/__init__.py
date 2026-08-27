@@ -1,1 +1,3 @@
-# Pacote de serviços internos da agência.
+"""
+__init__.py — torna services/ um pacote Python.
+"""
