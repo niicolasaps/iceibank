@@ -8,22 +8,13 @@ __pycache__/
 *.egg-info/
 dist/
 build/
-eggs/
-parts/
-var/
-sdist/
-wheels/
-.installed.cfg
-lib/
-lib64/
-
-# Ambientes virtuais
+.eggs/
 .venv/
 venv/
 ENV/
 env/
 
-# Logs e dados em runtime (gerados pela aplicação)
+# Logs gerados em runtime — não versionar
 agencia/data/
 
 # IDEs
@@ -35,11 +26,3 @@ agencia/data/
 # OS
 .DS_Store
 Thumbs.db
-
-# Evidências (imagens/prints - usar git lfs ou não versionar)
-# Descomente se não quiser versionar as evidências:
-# evidencias/
-
-# Variáveis de ambiente locais
-.env
-.env.local
