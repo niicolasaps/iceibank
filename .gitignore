@@ -1,0 +1,45 @@
+# Python
+__pycache__/
+*.py[cod]
+*.pyo
+*.pyd
+.Python
+*.egg
+*.egg-info/
+dist/
+build/
+eggs/
+parts/
+var/
+sdist/
+wheels/
+.installed.cfg
+lib/
+lib64/
+
+# Ambientes virtuais
+.venv/
+venv/
+ENV/
+env/
+
+# Logs e dados em runtime (gerados pela aplicação)
+agencia/data/
+
+# IDEs
+.vscode/
+.idea/
+*.swp
+*.swo
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Evidências (imagens/prints - usar git lfs ou não versionar)
+# Descomente se não quiser versionar as evidências:
+# evidencias/
+
+# Variáveis de ambiente locais
+.env
+.env.local
