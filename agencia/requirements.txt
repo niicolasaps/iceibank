@@ -1,4 +1,5 @@
-fastapi==0.115.5
+﻿fastapi==0.115.5
 uvicorn[standard]==0.32.1
 pydantic==2.10.3
-httpx==0.28.1        # equivalente ao axios do Node — usado na Parte D (transferências entre agências)
+httpx==0.28.1
+PyJWT==2.9.0
