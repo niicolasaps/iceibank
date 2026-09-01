@@ -56,3 +56,26 @@ def registrar_senha(body: RegistrarSenhaBody, request: Request):
 
     conta["senha"] = body.senha
     return {"mensagem": f"Senha da conta {body.idConta} cadastrada com sucesso."}
+
+
+@router.post("/bootstrap")
+def bootstrap(body: RegistrarSenhaBody, request: Request):
+    """
+    Cria a senha de uma conta existente OU cria a conta com saldo 0, sem JWT.
+    Necessario apenas para o setup inicial de testes.
+    Esta rota nao existiria em producao.
+    """
+    contas = request.app.state.contas
+    id_agencia = request.app.state.id_agencia
+
+    # Criar conta minima se nao existir ainda
+    if body.idConta not in contas:
+        from src import config as cfg
+        if cfg.agencia_responsavel(body.idConta) != id_agencia:
+            from fastapi import HTTPException
+            raise HTTPException(400, detail=f"Conta {body.idConta} nao pertence a esta agencia.")
+        contas[body.idConta] = {"id": body.idConta, "nomeAluno": f"Usuario {body.idConta}", "saldo": 0.0, "senha": body.senha}
+        return {"mensagem": f"Conta {body.idConta} criada com senha. Use POST /contas para atualizar os dados apos o login."}
+
+    contas[body.idConta]["senha"] = body.senha
+    return {"mensagem": f"Senha da conta {body.idConta} definida com sucesso."}
