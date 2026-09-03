@@ -1,12 +1,66 @@
 import { useState } from "react";
 import { api } from "../services/api";
 import MensagemErro from "./MensagemErro";
+
 export default function Transferencia() {
-  const [idOrigem,setIdOrigem]=useState(""); const [idDestino,setIdDestino]=useState(""); const [valor,setValor]=useState(""); const [res,setRes]=useState(null); const [erro,setErro]=useState(null);
-  async function transferir(e) { e.preventDefault(); setErro(null); setRes(null); try{setRes(await api.transferir(Number(idOrigem),Number(idDestino),Number(valor)));}catch(err){setErro(err.message);} }
-  return (<div style={card}><h3>Transferencia</h3><p style={{fontSize:12,color:"#64748b",margin:"0 0 10px"}}>O backend decide se e local ou entre agencias automaticamente.</p><form onSubmit={transferir} style={{display:"flex",gap:8,flexWrap:"wrap"}}><input type="number" value={idOrigem} onChange={e=>setIdOrigem(e.target.value)} placeholder="Conta origem" required style={inp}/><input type="number" value={idDestino} onChange={e=>setIdDestino(e.target.value)} placeholder="Conta destino" required style={inp}/><input type="number" value={valor} onChange={e=>setValor(e.target.value)} placeholder="Valor (R$)" step="0.01" required style={inp}/><button type="submit" style={{...btn,background:"#7c3aed"}}>Transferir</button></form><MensagemErro mensagem={erro} onFechar={()=>setErro(null)}/>{res&&<div style={ok}>{res.mensagem}</div>}</div>);
+  const [idOrigem, setIdOrigem] = useState("");
+  const [idDestino, setIdDestino] = useState("");
+  const [valor, setValor] = useState("");
+  const [res, setRes] = useState(null);
+  const [erro, setErro] = useState(null);
+  const [loading, setLoading] = useState(false);
+
+  async function transferir(e) {
+    e.preventDefault(); setErro(null); setRes(null); setLoading(true);
+    try { setRes(await api.transferir(Number(idOrigem), Number(idDestino), Number(valor))); }
+    catch (err) { setErro(err.message); }
+    finally { setLoading(false); }
+  }
+
+  return (
+    <div className="card">
+      <div className="card-title">🔄 Transferência</div>
+      <p className="card-desc">Transfira entre contas da mesma agência ou de agências diferentes.</p>
+
+      <div className="info-box">
+        <span>ℹ️</span>
+        <span>
+          O sistema detecta automaticamente se é local ou entre agências pelo ID.
+          Conta 0, 3, 6 → Ag. 0 &nbsp;·&nbsp; Conta 1, 4, 7 → Ag. 1 &nbsp;·&nbsp; Conta 2, 5, 8 → Ag. 2
+        </span>
+      </div>
+
+      <form onSubmit={transferir}>
+        <div className="form-row">
+          <div className="form-group">
+            <label className="form-label">Conta Origem</label>
+            <input className="form-input" type="number" value={idOrigem} onChange={e => setIdOrigem(e.target.value)} placeholder="Ex: 0" required />
+          </div>
+          <div className="form-group">
+            <label className="form-label">Conta Destino</label>
+            <input className="form-input" type="number" value={idDestino} onChange={e => setIdDestino(e.target.value)} placeholder="Ex: 1" required />
+          </div>
+        </div>
+
+        <div className="form-group">
+          <label className="form-label">Valor (R$)</label>
+          <input className="form-input" type="number" value={valor} onChange={e => setValor(e.target.value)} placeholder="0,00" step="0.01" min="0.01" required />
+        </div>
+
+        <MensagemErro mensagem={erro} onFechar={() => setErro(null)} />
+
+        {res && (
+          <MensagemErro
+            mensagem={res.mensagem || "Transferência concluída!"}
+            tipo="success"
+            onFechar={() => setRes(null)}
+          />
+        )}
+
+        <button type="submit" disabled={loading} className="btn btn-purple btn-full" style={{ marginTop: "0.5rem" }}>
+          {loading ? "⏳ Processando..." : "🔄 Confirmar Transferência"}
+        </button>
+      </form>
+    </div>
+  );
 }
-const card={background:"#fff",borderRadius:10,padding:"1.2rem",marginBottom:16,boxShadow:"0 2px 8px #0001"};
-const inp={padding:"7px 10px",borderRadius:6,border:"1px solid #d1d5db",flex:1,fontSize:14,minWidth:120};
-const btn={padding:"7px 16px",color:"#fff",border:"none",borderRadius:6,cursor:"pointer",fontWeight:600};
-const ok={marginTop:10,padding:10,background:"#f5f3ff",borderRadius:6,color:"#4c1d95"};

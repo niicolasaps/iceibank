@@ -1,9 +1,13 @@
-export default function MensagemErro({ mensagem, onFechar }) {
+export default function MensagemErro({ mensagem, tipo = "error", onFechar }) {
   if (!mensagem) return null;
+  const icons = { error: "✕", success: "✓" };
   return (
-    <div style={{ background: "#fee2e2", border: "1px solid #ef4444", borderRadius: 6, padding: "10px 14px", margin: "10px 0", color: "#b91c1c", display: "flex", justifyContent: "space-between", alignItems: "center" }}>
-      <span>{mensagem}</span>
-      {onFechar && <button onClick={onFechar} style={{ background: "none", border: "none", cursor: "pointer", fontWeight: "bold", color: "#b91c1c" }}>x</button>}
+    <div className={`alert alert-${tipo}`}>
+      <span style={{ fontSize: "1rem" }}>{icons[tipo]}</span>
+      <span style={{ flex: 1 }}>{mensagem}</span>
+      {onFechar && (
+        <button className="alert-close" onClick={onFechar}>✕</button>
+      )}
     </div>
   );
 }

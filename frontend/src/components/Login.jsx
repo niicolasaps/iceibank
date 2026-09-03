@@ -1,39 +1,102 @@
 import { useState } from "react";
-import MensagemErro from "./MensagemErro";
 import { getAgenciaUrl } from "../services/api";
-const AGENCIAS = ["http://localhost:4046","http://localhost:4047","http://localhost:4048"];
+import MensagemErro from "./MensagemErro";
+
+const AGENCIAS = [
+  { url: "http://localhost:4046", label: "Agência 0 — :4046" },
+  { url: "http://localhost:4047", label: "Agência 1 — :4047" },
+  { url: "http://localhost:4048", label: "Agência 2 — :4048" },
+];
+
 export default function Login({ onLogin, erroExterno }) {
   const [idConta, setIdConta] = useState("");
   const [senha, setSenha] = useState("");
   const [agencia, setAgencia] = useState(getAgenciaUrl());
   const [erro, setErro] = useState(null);
   const [carregando, setCarregando] = useState(false);
+
   async function handleSubmit(e) {
-    e.preventDefault(); setErro(null); setCarregando(true);
-    try { await onLogin(idConta, senha, agencia); }
-    catch (err) { setErro(err.message); }
-    finally { setCarregando(false); }
+    e.preventDefault();
+    setErro(null);
+    setCarregando(true);
+    try {
+      await onLogin(idConta, senha, agencia);
+    } catch (err) {
+      setErro(err.message);
+    } finally {
+      setCarregando(false);
+    }
   }
+
   return (
-    <div style={{ minHeight:"100vh",display:"flex",alignItems:"center",justifyContent:"center",background:"#f1f5f9" }}>
-      <div style={{ background:"#fff",borderRadius:12,padding:"2rem",width:360,boxShadow:"0 4px 24px #0001" }}>
-        <h1 style={{ textAlign:"center",margin:0,color:"#1e40af" }}>ICEIBank</h1>
-        <p style={{ textAlign:"center",color:"#64748b",fontSize:13,marginBottom:"1.5rem" }}>Sistema Distribuido de Agencias Bancarias</p>
+    <div className="login-bg">
+      <div className="login-card">
+        <div className="login-logo">
+          <span className="login-icon">🏦</span>
+          <div className="login-title">ICEIBank</div>
+          <div className="login-subtitle">Sistema Bancário Distribuído</div>
+          <div className="login-divider" />
+        </div>
+
         <form onSubmit={handleSubmit}>
-          <label style={{ display:"block",fontSize:13,fontWeight:600,color:"#374151",marginBottom:4,marginTop:12 }}>Agencia</label>
-          <select value={agencia} onChange={e => setAgencia(e.target.value)} style={{ width:"100%",padding:"8px 10px",borderRadius:6,border:"1px solid #d1d5db",fontSize:14,boxSizing:"border-box" }}>
-            {AGENCIAS.map(a => <option key={a} value={a}>{a}</option>)}
-          </select>
-          <label style={{ display:"block",fontSize:13,fontWeight:600,color:"#374151",marginBottom:4,marginTop:12 }}>ID da Conta</label>
-          <input type="number" value={idConta} onChange={e => setIdConta(e.target.value)} required style={{ width:"100%",padding:"8px 10px",borderRadius:6,border:"1px solid #d1d5db",fontSize:14,boxSizing:"border-box" }} placeholder="Ex: 0" />
-          <label style={{ display:"block",fontSize:13,fontWeight:600,color:"#374151",marginBottom:4,marginTop:12 }}>Senha</label>
-          <input type="password" value={senha} onChange={e => setSenha(e.target.value)} required style={{ width:"100%",padding:"8px 10px",borderRadius:6,border:"1px solid #d1d5db",fontSize:14,boxSizing:"border-box" }} placeholder="Senha da conta" />
+          <div className="form-group">
+            <label className="form-label">Agência</label>
+            <select
+              className="form-select"
+              value={agencia}
+              onChange={e => setAgencia(e.target.value)}
+            >
+              {AGENCIAS.map(a => (
+                <option key={a.url} value={a.url}>{a.label}</option>
+              ))}
+            </select>
+          </div>
+
+          <div className="form-row">
+            <div className="form-group">
+              <label className="form-label">ID da Conta</label>
+              <input
+                className="form-input"
+                type="number"
+                value={idConta}
+                onChange={e => setIdConta(e.target.value)}
+                placeholder="Ex: 0"
+                required
+              />
+            </div>
+            <div className="form-group">
+              <label className="form-label">Senha</label>
+              <input
+                className="form-input"
+                type="password"
+                value={senha}
+                onChange={e => setSenha(e.target.value)}
+                placeholder="••••••••"
+                required
+              />
+            </div>
+          </div>
+
           <MensagemErro mensagem={erro || erroExterno} onFechar={() => setErro(null)} />
-          <button type="submit" disabled={carregando} style={{ width:"100%",padding:"10px",background:"#1d4ed8",color:"#fff",border:"none",borderRadius:6,fontWeight:600,cursor:"pointer",marginTop:16,fontSize:15 }}>
-            {carregando ? "Entrando..." : "Entrar"}
+
+          <button
+            type="submit"
+            disabled={carregando}
+            className="btn btn-gold btn-full"
+            style={{ marginTop: "1.25rem" }}
+          >
+            {carregando ? (
+              <>⏳ Autenticando...</>
+            ) : (
+              <>🔐 Acessar Conta</>
+            )}
           </button>
         </form>
-        <p style={{ textAlign:"center",fontSize:12,color:"#888",marginTop:12 }}>Senha padrao: 1234. Use POST /auth/bootstrap para criar acesso.</p>
+
+        <p style={{ textAlign: "center", fontSize: "0.72rem", color: "rgba(241,245,249,0.25)", marginTop: "1.5rem", lineHeight: 1.6 }}>
+          Primeiro acesso? Use <code style={{ color: "rgba(212,175,55,0.7)" }}>POST /auth/bootstrap</code><br />
+          para criar credenciais via terminal.
+        </p>
       </div>
     </div>
   );
