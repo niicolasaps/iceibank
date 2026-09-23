@@ -1,15 +1,12 @@
-﻿"""
-main.py — Ponto de entrada da agencia ICEIBank
-Equivalente ao app.js do exemplo Node.js/Express do roteiro.
+"""
+main.py - Ponto de entrada da agencia ICEIBank
 
-Novidade (Parte F): gera token de servico no startup e armazena em app.state.
-Esse token e usado pela logica de transferencia entre agencias para autenticar
-as chamadas maquina-a-maquina ao endpoint /contas/{id}/creditar-remoto.
+Como executar localmente:
+  $env:AGENCIA_ID="0"; python -m uvicorn src.main:app --port 4046 --reload
+  $env:AGENCIA_ID="1"; python -m uvicorn src.main:app --port 4047 --reload
+  $env:AGENCIA_ID="2"; python -m uvicorn src.main:app --port 4048 --reload
 
-Como executar (PowerShell, um terminal por agencia):
-  $env:AGENCIA_ID="0"; uvicorn src.main:app --port 4046 --reload
-  $env:AGENCIA_ID="1"; uvicorn src.main:app --port 4047 --reload
-  $env:AGENCIA_ID="2"; uvicorn src.main:app --port 4048 --reload
+Em producao (Render), o PORT e fornecido automaticamente pelo ambiente.
 """
 
 import os
@@ -28,34 +25,33 @@ id_agencia = int(os.environ.get("AGENCIA_ID", "0"))
 
 agencia_cfg = next((a for a in config.AGENCIAS if a["id"] == id_agencia), None)
 if agencia_cfg is None:
-    print(f"Agência {id_agencia} não configurada em config.py", file=sys.stderr)
+    print(f"Agencia {id_agencia} nao configurada em config.py", file=sys.stderr)
     sys.exit(1)
 
 app = FastAPI(
-    title=f"ICEIBank — Agência {id_agencia}",
-    description="API REST do ICEIBank com Relógio Lógico de Lamport (Sprint 1)",
+    title=f"ICEIBank - Agencia {id_agencia}",
+    description="API REST do ICEIBank com Relogio Logico de Lamport (Sprint 1)",
     version="1.0.0",
 )
 
-# CORS — necessario para o frontend React em desenvolvimento (porta 5173)
+# CORS - aceita qualquer origem para funcionar no Vercel e em laboratorios
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["http://localhost:5173", "http://127.0.0.1:5173"],
-    allow_credentials=True,
+    allow_origins=["*"],
+    allow_credentials=False,
     allow_methods=["*"],
     allow_headers=["*"],
 )
 
-# Estado compartilhado — equivalente ao app.locals do Express
+# Estado compartilhado
 app.state.id_agencia = id_agencia
 app.state.relogio = RelogioLamport()
 app.state.registro = RegistroEventos(f"agencia-{id_agencia}")
 app.state.contas = {}
-app.state.token_servico = criar_token_servico()  # token maquina-a-maquina
+app.state.token_servico = criar_token_servico()
 
 app.include_router(router)
 
-from urllib.parse import urlparse
-porta = urlparse(agencia_cfg["url"]).port
-print(f"[Agência {id_agencia}] ouvindo na porta {porta}")
-print(f"[Agência {id_agencia}] Swagger UI: http://localhost:{porta}/docs")
+porta = os.environ.get("PORT", str(config.PORTA_BASE + id_agencia))
+print(f"[Agencia {id_agencia}] ouvindo na porta {porta}")
+print(f"[Agencia {id_agencia}] Documentacao interativa: http://localhost:{porta}/docs")

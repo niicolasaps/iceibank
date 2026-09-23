@@ -2,16 +2,24 @@ import { useState } from "react";
 import { getAgenciaUrl } from "../services/api";
 import MensagemErro from "./MensagemErro";
 
+// URLs das agencias - locais para desenvolvimento, Render para producao
 const AGENCIAS = [
-  { url: "http://localhost:4046", label: "Agência 0 — :4046" },
-  { url: "http://localhost:4047", label: "Agência 1 — :4047" },
-  { url: "http://localhost:4048", label: "Agência 2 — :4048" },
+  // Producao (Render) - substituir pelos links reais apos o deploy
+  ...(import.meta.env.VITE_AGENCIA_0_URL ? [
+    { url: import.meta.env.VITE_AGENCIA_0_URL, label: "Agencia 0 (Render)" },
+    { url: import.meta.env.VITE_AGENCIA_1_URL, label: "Agencia 1 (Render)" },
+    { url: import.meta.env.VITE_AGENCIA_2_URL, label: "Agencia 2 (Render)" },
+  ] : []),
+  // Local (desenvolvimento)
+  { url: "http://localhost:4046", label: "Agencia 0 — :4046 (local)" },
+  { url: "http://localhost:4047", label: "Agencia 1 — :4047 (local)" },
+  { url: "http://localhost:4048", label: "Agencia 2 — :4048 (local)" },
 ];
 
 export default function Login({ onLogin, erroExterno }) {
   const [idConta, setIdConta] = useState("");
   const [senha, setSenha] = useState("");
-  const [agencia, setAgencia] = useState(getAgenciaUrl());
+  const [agencia, setAgencia] = useState(AGENCIAS[0].url);
   const [erro, setErro] = useState(null);
   const [carregando, setCarregando] = useState(false);
 
@@ -85,11 +93,7 @@ export default function Login({ onLogin, erroExterno }) {
             className="btn btn-gold btn-full"
             style={{ marginTop: "1.25rem" }}
           >
-            {carregando ? (
-              <>⏳ Autenticando...</>
-            ) : (
-              <>🔐 Acessar Conta</>
-            )}
+            {carregando ? <>⏳ Autenticando...</> : <>🔐 Acessar Conta</>}
           </button>
         </form>
 
