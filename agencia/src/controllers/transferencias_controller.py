@@ -1,18 +1,22 @@
-﻿"""
-transferencias_controller.py — Controlador de Transferencias do ICEIBank
-Equivalente ao transferenciasController.js do roteiro. (Parte D, Seção 8)
+"""
+transferencias_controller.py - Controlador de Transferencias do ICEIBank
+Equivalente ao transferenciasController.js do roteiro.
 
-Parte F: transferir exige JWT de usuario; creditar-remoto aceita token de servico.
+Sprint 2: a chamada REST direta (creditar-remoto) foi substituida por
+mensageria assincrona via RabbitMQ. A rota /contas/{id}/creditar-remoto
+foi REMOVIDA - o credito remoto agora chega pela fila, consumido em main.py.
 
-LIMITACAO CONHECIDA (intencional): sem rollback em falha entre agencias.
+Mudanca de semantica:
+  Sprint 1: HTTP 200 = credito JA aplicado na outra agencia.
+  Sprint 2: HTTP 200 = mensagem PUBLICADA na fila (credito sera aplicado de forma assincrona).
 """
 
-import httpx
 from fastapi import APIRouter, Depends, HTTPException, Request
 from pydantic import BaseModel
 
 from src import config
-from src.services.auth import get_token_qualquer, get_usuario_atual
+from src.services.auth import get_usuario_atual
+from src.services.mensageria import publicar
 
 router = APIRouter()
 
@@ -21,12 +25,6 @@ class TransferenciaBody(BaseModel):
     idOrigem: int
     idDestino: int
     valor: float
-
-
-class CreditarRemotoBody(BaseModel):
-    valor: float
-    timestampLamport: int
-    origemAgencia: int
 
 
 @router.post("/transferencias")
@@ -42,76 +40,47 @@ async def transferir(
 
     conta_origem = contas.get(body.idOrigem)
     if conta_origem is None:
-        raise HTTPException(status_code=404, detail="Conta de origem não encontrada nesta agência.")
+        raise HTTPException(status_code=404, detail="Conta de origem nao encontrada nesta agencia.")
     if conta_origem["saldo"] < body.valor:
         raise HTTPException(status_code=400, detail="Saldo insuficiente.")
 
     agencia_destino = config.agencia_responsavel(body.idDestino)
 
-    ts_debito = relogio.evento_local()
+    # Debito com evento local (vetor vetorial)
+    vetor_debito = relogio.evento_local()
     conta_origem["saldo"] -= body.valor
-    registro.registrar("TRANSFERENCIA_DEBITO", ts_debito, {
+    registro.registrar("TRANSFERENCIA_DEBITO", vetor_debito, {
         "idOrigem": body.idOrigem, "idDestino": body.idDestino, "valor": body.valor
     })
 
+    # Transferencia local (mesma agencia)
     if agencia_destino == id_agencia:
         conta_destino = contas.get(body.idDestino)
         if conta_destino is None:
-            conta_origem["saldo"] += body.valor
-            raise HTTPException(status_code=404, detail="Conta de destino não encontrada.")
-        ts_credito = relogio.evento_local()
+            conta_origem["saldo"] += body.valor  # rollback local
+            raise HTTPException(status_code=404, detail="Conta de destino nao encontrada.")
+        vetor_credito = relogio.evento_local()
         conta_destino["saldo"] += body.valor
-        registro.registrar("TRANSFERENCIA_CREDITO", ts_credito, {
+        registro.registrar("TRANSFERENCIA_CREDITO", vetor_credito, {
             "idOrigem": body.idOrigem, "idDestino": body.idDestino, "valor": body.valor
         })
-        return {"mensagem": "Transferência concluída (mesma agência)."}
+        return {"mensagem": "Transferencia concluida (mesma agencia)."}
 
-    ts_envio = relogio.ao_enviar()
-    url_destino = next(a["url"] for a in config.AGENCIAS if a["id"] == agencia_destino)
-    token_servico = request.app.state.token_servico
-    headers = {"Authorization": f"Bearer {token_servico}"}
-
-    try:
-        async with httpx.AsyncClient() as client:
-            resp = await client.post(
-                f"{url_destino}/contas/{body.idDestino}/creditar-remoto",
-                json={"valor": body.valor, "timestampLamport": ts_envio, "origemAgencia": id_agencia},
-                headers=headers,
-                timeout=5.0,
-            )
-            resp.raise_for_status()
-        return {"mensagem": "Transferência concluída (entre agências)."}
-
-    except Exception as e:
-        registro.registrar("TRANSFERENCIA_FALHOU", relogio.evento_local(), {
-            "idOrigem": body.idOrigem, "idDestino": body.idDestino,
-            "valor": body.valor, "erro": str(e),
-        })
-        raise HTTPException(
-            status_code=502,
-            detail="Falha ao contatar agência de destino. Débito já aplicado - inconsistência conhecida (ver Sprint 4).",
-        )
-
-
-@router.post("/contas/{id}/creditar-remoto")
-async def creditar_remoto(
-    id: int,
-    body: CreditarRemotoBody,
-    request: Request,
-    _token=Depends(get_token_qualquer),
-):
-    contas = request.app.state.contas
-    relogio = request.app.state.relogio
-    registro = request.app.state.registro
-
-    ts = relogio.ao_receber(body.timestampLamport)
-
-    conta = contas.get(id)
-    if conta is None:
-        raise HTTPException(status_code=404, detail="Conta não encontrada nesta agência.")
-
-    conta["saldo"] += body.valor
-    registro.registrar("TRANSFERENCIA_CREDITO_REMOTO", ts, {
-        "idConta": id, "valor": body.valor, "origemAgencia": body.origemAgencia
+    # Transferencia entre agencias - publica na fila via RabbitMQ
+    # (Sprint 1 fazia chamada REST direta aqui - agora e assincrono)
+    vetor_envio = relogio.ao_enviar()
+    await _publicar_async(f"agencia.{agencia_destino}.creditar", {
+        "idConta": body.idDestino,
+        "valor": body.valor,
+        "vetorEnvio": vetor_envio,
+        "origemAgencia": id_agencia,
     })
-    return {"mensagem": "Crédito remoto aplicado.", "saldoAtual": conta["saldo"]}
+
+    return {"mensagem": "Transferencia publicada para a agencia de destino (entrega assincrona)."}
+
+
+async def _publicar_async(routing_key: str, mensagem: dict) -> None:
+    """Chama publicar() de forma compativel com o event loop do FastAPI."""
+    import asyncio
+    loop = asyncio.get_event_loop()
+    await loop.run_in_executor(None, publicar, routing_key, mensagem)
