@@ -136,3 +136,172 @@ A separação ficou razoavelmente clara, especialmente para `api.js` (Model) e o
 **Por que não exige JWT:** health-checks são endpoints de infraestrutura, geralmente públicos. Não expõem dados sensíveis de nenhuma conta específica — apenas métricas agregadas de operação da agência.
 
 **Evidência:** `evidencias/sprint1/funcionalidade-adicional.png`
+
+---
+
+# RESPOSTAS Sprint 2 - ICEIBank
+
+## Secao 6.4 - Perguntas sobre RabbitMQ e Mensageria
+
+### Pergunta 1
+**Por que usamos uma exchange do tipo "topic" em vez de "direct" ou "fanout"?**
+
+A exchange "direct" roteia mensagens para uma fila especifica por chave exata - nao tem flexibilidade
+para padroes. A "fanout" manda para TODAS as filas ligadas - nao serve para direcionar a credito para
+uma agencia especifica.
+
+O tipo "topic" permite routing keys com padroes (wildcards). Usamos:
+  - "agencia.0.creditar"            -> fila-agencia-0 so recebe creditos para ela
+  - "agencia.0.alerta-saldo-baixo"  -> poderia ter consumidor dedicado para alertas
+
+Isso permite usar UMA UNICA exchange para todos os tipos de mensagem (creditos e alertas),
+separando os consumidores por routing key. E exatamente o padrao Publish/Subscribe.
+
+### Pergunta 2
+**O que significa durable=True na fila e delivery_mode=2 na mensagem? Por que sao importantes?**
+
+  - durable=True na fila: a fila sobrevive a um reinicio do RabbitMQ. Se o broker reiniciar,
+    a fila ainda existe e as mensagens persistidas continuam la.
+
+  - delivery_mode=2 na mensagem (PERSISTENT): a mensagem e gravada em disco pelo RabbitMQ
+    antes de confirmar o recebimento. Se o broker cair antes de entregar, a mensagem nao some.
+
+Sem essas configuracoes: uma queda do RabbitMQ perderia filas e mensagens.
+Com elas: o sistema resiste a falhas do broker.
+
+### Pergunta 3
+**O que acontece com uma mensagem se a agencia de destino estiver fora do ar no momento da transferencia?**
+
+A mensagem e publicada na exchange e fica retida na fila duravel da agencia de destino.
+O RabbitMQ a guarda ate que o consumidor se conecte.
+
+Quando a agencia volta a funcionar, o consumidor conecta e processa a mensagem automaticamente.
+A transferencia e entregue sem nenhuma intervencao manual.
+
+Porem: se a agencia REINICIOU (nao apenas ficou fora do ar), o estado em memoria foi zerado.
+Quando o consumidor processa a mensagem, a conta nao existe mais. Nesse caso, o sistema
+registra CREDITO_REMOTO_FALHOU no log. A mensagem NAO se perdeu - o problema e a falta de
+persistencia dos dados (assunto do Sprint 4).
+
+---
+
+## Secao 7.5 - Perguntas sobre Resiliencia
+
+### Pergunta 1
+**No teste de resiliencia, a mensagem se perdeu quando a Agencia 1 ficou fora do ar?**
+
+Nao. A mensagem ficou na fila duravel do RabbitMQ durante todo o tempo que a Agencia 1 esteve
+fora do ar. Quando ela voltou, o consumidor processou a mensagem imediatamente.
+
+Isso e a vantagem central da mensageria assincrona sobre a chamada REST direta do Sprint 1:
+no Sprint 1, se o destino estivesse fora do ar, a chamada HTTP falhava e o debito ficava
+pendurado. No Sprint 2, a mensagem fica na fila ate ser entregue.
+
+### Pergunta 2
+**O que aconteceu quando a Agencia 1 reiniciou (nao apenas ficou fora do ar)?**
+
+O estado em memoria foi zerado - as contas nao existem mais. Quando o consumidor processou
+a mensagem da fila, a conta de destino nao foi encontrada. O sistema registrou:
+  CREDITO_REMOTO_FALHOU, motivo: "conta nao encontrada"
+
+O log mostrou: [Consumidor] ATENCAO: conta 1 nao encontrada - credito nao aplicado!
+
+Isso demonstra a limitacao conhecida do Sprint 2: a mensageria e duravel, mas a persistencia
+dos dados nao existe ainda (Sprint 4). A inconsistencia nao e da fila - e da falta de banco.
+
+### Pergunta 3
+**Como garantir consistencia mesmo com reinicio da agencia de destino?**
+
+Opcao 1 - Banco de dados persistente: as contas ficam em banco (Sprint 4). Ao reiniciar,
+a agencia releia o estado do banco e as contas existem antes do consumidor processar as filas.
+
+Opcao 2 - Reconhecimento (ack) manual: o consumidor so confirma a mensagem ao RabbitMQ DEPOIS
+de ter aplicado o credito com sucesso. Se falhar, a mensagem volta para a fila. Porem sem
+banco de dados, a conta simplesmente nao existe apos reinicio - o ack nao resolve isso.
+
+A solucao real exige as duas coisas: banco de dados + ack manual.
+
+---
+
+## Secao 8.3 - Perguntas sobre Linha do Tempo Causal (Relogio Vetorial)
+
+### Pergunta 1
+**O que exatamente no relogio vetorial torna possivel a comparacao confiavel de concorrencia?**
+
+O Relogio de Lamport usa um UNICO numero. Dados dois timestamps diferentes, A=5 e B=7,
+sabemos que 5 < 7... mas nao sabemos se A causou B, ou se foram eventos independentes em
+agencias diferentes que so tiveram numeros diferentes por acaso.
+
+O Relogio Vetorial mantem um VETOR com um contador por agencia. Cada mensagem carrega o
+vetor inteiro. Quando uma agencia recebe uma mensagem, ela sabe exatamente quantos eventos
+CADA OUTRA agencia havia feito no momento do envio.
+
+Com dois vetores V1 e V2:
+  - Se V1[i] <= V2[i] para todo i: V1 aconteceu ANTES de V2 com CERTEZA.
+    (V2 "conhecia" tudo que V1 havia registrado)
+  - Se nenhum domina o outro: sao CONCORRENTES com CERTEZA.
+    (nenhum dos dois "conhecia" o estado completo do outro)
+
+Essa certeza e impossivel com Lamport: ts(A) < ts(B) nao implica causalidade.
+Com vetorial, V1 < V2 (componente a componente) IMPLICA causalidade.
+
+### Pergunta 2
+**Encontre um par concorrente no seu teste. Faz sentido que sejam concorrentes?**
+
+Exemplo tipico: apos fazer depositos na Agencia 0 e saques na Agencia 2, sem nenhuma
+transferencia entre elas, o script identifica pares como:
+
+  [agencia-0] DEPOSITO ([2, 0, 0]) x [agencia-2] SAQUE ([0, 0, 1])
+
+Faz total sentido: a Agencia 0 fez seu deposito sem saber NADA do que a Agencia 2 estava
+fazendo (posicao 2 do vetor de Ag0 = 0 significa que ela nunca recebeu mensagem de Ag2).
+Da mesma forma, Ag2 nao sabia nada de Ag0 (posicao 0 do vetor de Ag2 = 0).
+
+Eles realmente nao tem relacao de causa e efeito: sao operacoes em contas diferentes,
+em agencias diferentes, sem comunicacao entre si naquele momento.
+
+### Pergunta 3
+**O algoritmo O(n^2) seria problema em producao? Como tornar mais escalavel?**
+
+Sim. Com 1 milhao de eventos, seriam 500 bilhoes de comparacoes - impraticavel.
+
+Alternativas mais escalaveis:
+
+1. Analise incremental: ao registrar cada evento, comparar APENAS com os eventos recentes
+   (janela de tempo), nao com todos os eventos historicos. A grande maioria dos pares
+   concorrentes esta proxima no tempo.
+
+2. Indice por agencia: em vez de comparar todos x todos, manter o "ultimo vetor visto"
+   de cada agencia e comparar so os vetores que realmente podem conflitar (quando um
+   componente de uma agencia nao aparece no vetor de outra).
+
+3. Analise distribuida: cada agencia detecta concorrencia localmente ao receber mensagens.
+   Quando ao_receber() detecta que o vetor recebido tem componentes que a agencia local
+   nunca viu, pode-se registrar o evento como potencialmente concorrente com eventos locais
+   que aconteceram desde o ultimo recebimento daquela agencia.
+
+4. Ferramentas de stream processing (Kafka Streams, Apache Flink): processam eventos em
+   paralelo com janelas de tempo, tornando a comparacao O(n log n) em vez de O(n^2).
+
+---
+
+## Funcionalidade Adicional Sprint 2 - Notificacao de Saldo Baixo
+
+**O que faz:** apos cada deposito ou saque, se o saldo da conta ficar abaixo de R$ 50,00
+(LIMITE_SALDO_BAIXO definido em contas_controller.py), a agencia publica automaticamente
+um evento de alerta na exchange do RabbitMQ com a routing key:
+  agencia.{id}.alerta-saldo-baixo
+
+**Payload da mensagem:**
+  {"tipo": "ALERTA_SALDO_BAIXO", "idConta": 0, "saldoAtual": 20.0, "limite": 50.0}
+
+**Por que foi escolhida:** demonstra o uso de topicos separados na mesma exchange topic.
+A mesma infraestrutura de mensageria usada para creditos tambem serve para notificacoes,
+sem criar uma nova exchange. Em producao, um servico de notificacoes poderia assinar
+"agencia.*.alerta-saldo-baixo" e disparar SMS/email para o cliente.
+
+**Implementacao:** _verificar_saldo_baixo() em contas_controller.py, chamada apos
+depositar() e sacar(). Usa publicar() do mensageria.py - nao bloqueia a resposta HTTP.
+
+**Por que nao exige consumidor dedicado:** o objetivo e demonstrar a publicacao. O
+CloudAMQP Manager confirma que a mensagem chega na exchange com a routing key correta.
