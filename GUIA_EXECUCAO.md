@@ -101,6 +101,56 @@ Voce pode ver no CloudAMQP Manager: https://www.cloudamqp.com/
 
 ---
 
+---
+
+### Demo 5 -- Linha do tempo causal (mesclar_logs.py)
+
+Abra o PowerShell e rode:
+
+    cd C:\Users\Nicolas\Desktop\iceibank\agencia
+    Write-Host "Executado em: $(Get-Date -Format 'dd/MM/yyyy HH:mm:ss')"
+    python mesclar_logs.py
+
+O que deve aparecer:
+
+1. SECAO "Linha do tempo (ordenada por hora de parede)":
+   Lista todos os eventos de todas as agencias em ordem cronologica.
+   Cada linha mostra: [agencia] vetor=[x,y,z] TIPO_EVENTO {detalhes}
+
+   Exemplo:
+     [agencia-0] vetor=[1, 0, 0] DEPOSITO {"id": 0, "valor": 500.0}
+     [agencia-1] vetor=[0, 1, 0] DEPOSITO {"id": 1, "valor": 300.0}
+
+2. SECAO "Pares de eventos CONCORRENTES entre agencias diferentes":
+   Lista os pares de eventos que aconteceram de forma INDEPENDENTE,
+   sem relacao causal entre si.
+
+   Exemplo de par concorrente (o que explica para o professor):
+     [agencia-0] DEPOSITO ([1, 0, 0]) x [agencia-1] DEPOSITO ([0, 1, 0])
+
+   Por que sao concorrentes?
+   A Agencia 0 nao sabia nada da Agencia 1 (posicao 1 do seu vetor = 0).
+   A Agencia 1 nao sabia nada da Agencia 0 (posicao 0 do seu vetor = 0).
+   Sao depositos independentes, sem relacao de causa e efeito.
+
+3. O par de TRANSFERENCIA nao aparece na lista de concorrentes:
+   [agencia-0] TRANSFERENCIA_DEBITO ([2, 0, 0]) -- nao esta na lista
+   [agencia-1] TRANSFERENCIA_CREDITO_REMOTO ([3, 2, 0]) -- nao esta na lista
+
+   Por que NAO sao concorrentes?
+   [2,0,0] <= [3,2,0] em todas as posicoes (2<=3, 0<=2, 0<=0).
+   O DEBITO aconteceu ANTES do CREDITO -- existe relacao causal.
+   O script detectou isso corretamente.
+
+  O que explica para o professor:
+  "O script compara os vetores de todos os pares de eventos entre agencias
+  diferentes. Se nenhum vetor domina o outro componente a componente,
+  os eventos sao CONCORRENTES: aconteceram sem se influenciar. Se um vetor
+  e menor ou igual ao outro em TODAS as posicoes, ha relacao causal.
+  Isso e impossivel de determinar com o Relogio de Lamport (numero unico)."
+
+---
+
 ## A.5 -- Demonstracao via PowerShell (API diretamente)
 
     $base0 = "https://iceibank-agencia-0.onrender.com"
