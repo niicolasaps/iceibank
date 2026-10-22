@@ -15,6 +15,8 @@ Como executar localmente:
 
 import os
 import sys
+import threading
+import time
 
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
@@ -22,6 +24,8 @@ from fastapi.middleware.cors import CORSMiddleware
 from src import config
 from src.routes import router
 from src.services.auth import criar_token_servico
+from src.services import bully_service
+from src.services.bully_service import ServicoBully
 from src.services.event_log import RegistroEventos
 from src.services.mensageria import assinar
 from src.services.vector_clock import RelogioVetorial
@@ -50,6 +54,7 @@ app.add_middleware(
 app.state.id_agencia = id_agencia
 app.state.relogio = RelogioVetorial(id_agencia, config.NUMERO_AGENCIAS)
 app.state.registro = RegistroEventos(f"agencia-{id_agencia}")
+app.state.bully = ServicoBully(id_agencia, app.state.relogio, app.state.registro)
 app.state.contas = {}
 app.state.token_servico = criar_token_servico()
 
@@ -95,6 +100,21 @@ def iniciar_consumidor():
         print(f"[Consumidor] Credito de R${valor} aplicado na conta {id_conta}. Novo saldo: R${saldo_fmt}")
 
     assinar(id_agencia, processar_credito)
+
+
+@app.on_event("startup")
+def iniciar_bully():
+    """
+    Sprint 3 - Parte A: dispara a eleicao inicial em background.
+    Equivalente a bully.iniciarEleicao() dentro do callback do app.listen.
+    Em thread para nao bloquear a subida: as outras agencias precisam conseguir
+    chamar /bully/eleicao desta enquanto ela ainda esta iniciando.
+    """
+    def _eleicao_inicial():
+        time.sleep(bully_service.ATRASO_INICIAL_S)  # aguarda o servidor comecar a ouvir
+        app.state.bully.iniciar_eleicao()
+
+    threading.Thread(target=_eleicao_inicial, daemon=True).start()
 
 
 porta = os.environ.get("PORT", str(config.PORTA_BASE + id_agencia))
