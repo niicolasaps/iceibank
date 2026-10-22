@@ -116,6 +116,9 @@ def iniciar_bully():
 
     threading.Thread(target=_eleicao_inicial, daemon=True).start()
 
+    # Parte B: equivalente a bully.iniciarHeartbeat() logo apos iniciarEleicao()
+    app.state.bully.iniciar_heartbeat()
+
 
 porta = os.environ.get("PORT", str(config.PORTA_BASE + id_agencia))
 print(f"[Agencia {id_agencia}] ouvindo na porta {porta}")

@@ -20,6 +20,7 @@ Constantes ficam no topo do modulo (facilita torna-las configuraveis por env var
 """
 
 import threading
+import time
 from typing import List, Optional
 
 import httpx
@@ -33,6 +34,8 @@ TIMEOUT_S: float = 1.0
 # Pequena espera antes da eleicao inicial: o startup do FastAPI roda ANTES do socket
 # ser aberto, entao damos tempo ao servidor para comecar a ouvir (ver main.py).
 ATRASO_INICIAL_S: float = 1.0
+# Parte B: intervalo padrao do heartbeat (equivalente a intervaloMs = 3000 do Node).
+INTERVALO_HEARTBEAT_S: float = 3.0
 
 
 class ServicoBully:
@@ -119,3 +122,40 @@ class ServicoBully:
     def obter_lider_atual(self) -> Optional[int]:
         with self._lock:
             return self._lider_atual
+
+    # --- Parte B: heartbeat e failover ---
+
+    def verificar_lider(self) -> None:
+        with self._lock:
+            lider_atual = self._lider_atual
+
+        if lider_atual is None:
+            self.iniciar_eleicao()
+            return
+        if lider_atual == self.id_agencia:
+            return  # eu sou o lider, nada a verificar
+
+        lider_info = next(a for a in config.AGENCIAS if a["id"] == lider_atual)
+        try:
+            httpx.get(f"{lider_info['url']}/bully/lider", timeout=TIMEOUT_S)
+        except Exception:
+            vetor = self.relogio.evento_local()
+            self.registro.registrar(
+                "LIDER_NAO_RESPONDEU", vetor, {"liderAtual": lider_atual, "agencia": self.id_agencia}
+            )
+            with self._lock:
+                self._lider_atual = None
+            self.iniciar_eleicao()
+
+    def iniciar_heartbeat(self, intervalo_s: float = INTERVALO_HEARTBEAT_S) -> None:
+        """Equivalente ao setInterval(verificarLider, intervaloMs) - roda em thread daemon."""
+        def _loop():
+            while True:
+                time.sleep(intervalo_s)
+                try:
+                    self.verificar_lider()
+                except Exception as erro:
+                    # uma falha pontual nao pode matar o heartbeat
+                    print(f"[Bully] Erro no heartbeat: {erro}")
+
+        threading.Thread(target=_loop, daemon=True).start()
