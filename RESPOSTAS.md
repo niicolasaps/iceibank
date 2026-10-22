@@ -348,3 +348,69 @@ diferentes. Bug seria o estado final divergente (agencias discordando da lider),
 (as tres responderam liderAtual = 2 em /bully/lider).
 
 ---
+## Secao 6.4 - Perguntas sobre Heartbeat e Failover
+
+### Pergunta 1
+**O que aconteceria se o intervalo do heartbeat fosse muito curto (100ms)? E muito longo (60s)?**
+
+E um trade-off entre velocidade de deteccao e custo de rede/CPU.
+
+Intervalo muito curto (100ms): cada agencia que nao e lider faz 10 GET /bully/lider por segundo
+na lider. Com 3 agencias o custo ainda e pequeno, mas escala mal: com N agencias seriam
+(N-1) x 10 requisicoes/s so de "estou vivo?", mesmo sem nenhuma operacao bancaria acontecendo.
+Alem disso, o timeout de resposta (1s) e MAIOR que o intervalo: varias verificacoes ficariam
+sobrepostas, e qualquer pequeno atraso ocasional de rede viraria um falso positivo
+(LIDER_NAO_RESPONDEU), disparando eleicoes desnecessarias. A lider ficaria instavel sem estar
+realmente fora do ar.
+
+Intervalo muito longo (60s): quase nao ha custo de rede, mas o tempo de deteccao da queda pode
+chegar a 60s (mais o timeout de 1s). Durante esse tempo as agencias seguem apontando para uma
+lider morta e o sistema fica sem lider efetiva. No Sprint 4, quando a lider coordenar transacoes
+(2PC), isso significaria transacoes travadas ou falhando por quase um minuto.
+
+O valor padrao de 3s e um meio-termo: nos meus logs, a queda da lider foi detectada pelas duas
+agencias restantes em cerca de 1s uma da outra (05:10:34 e 05:10:35) e a nova lider assumiu
+em ~2s depois da deteccao (TORNOU_LIDER as 05:10:36).
+
+### Pergunta 2
+**A agencia que caiu e voltou "toma" a lideranca de volta. Isso e desejavel? Que problema pode causar?**
+
+Pelo algoritmo de Bully e inevitavel (a regra e "maior ID ativo sempre vence"), mas nem sempre e
+desejavel. Nos meus logs: a agencia 2 caiu, a agencia 1 virou lider (05:10:36) e funcionou
+normalmente. Quando a 2 voltou (05:15:59), ela iniciou eleicao, nao achou ID maior, virou lider
+e anunciou coordenador; as agencias 0 e 1 passaram a apontar para ela (05:16:00 e 05:16:02),
+mesmo com a lider anterior (1) perfeitamente saudavel.
+
+Problemas praticos em um sistema real:
+  - Troca de lideranca no meio de uma operacao importante: se a agencia 1 estivesse coordenando
+    uma transacao distribuida (2PC do Sprint 4), a lideranca mudaria no meio da transacao e a
+    nova lider (a 2) nao conheceria o estado dela. A transacao ficaria incompleta ou duplicada.
+  - Estado perdido: como o estado atual e so em memoria, a agencia que volta nao tem o historico
+    do que a lider interina fez enquanto ela estava fora, e pode decidir com informacao velha.
+  - Instabilidade: uma agencia que cai e volta repetidamente (flapping) causaria varias trocas de
+    lideranca seguidas, cada uma com custo de eleicao e janela sem lider.
+
+Alternativas usadas na pratica: so aceitar a troca quando a lider atual falhar de fato (como
+Raft e ZooKeeper, onde lider so muda por falha) ou fazer a agencia que volta sincronizar o estado
+antes de reivindicar a lideranca.
+
+### Pergunta 3
+**O que aconteceria se a rede estivesse lenta (resposta demorando mais que o TIMEOUT de 1s), sem a agencia estar fora do ar?**
+
+O codigo nao consegue distinguir "agencia fora do ar" de "agencia lenta": as duas viram a mesma
+excecao de timeout. Consequencias:
+
+  - No heartbeat: uma lider viva mas lenta e declarada morta (falso positivo). A agencia registra
+    LIDER_NAO_RESPONDEU, esquece a lider e inicia uma eleicao desnecessaria.
+  - Na eleicao: se a agencia de ID maior responder depois de 1s, quem perguntou conclui que
+    ninguem respondeu e se declara lider. Mas a requisicao CHEGOU na agencia maior, que tambem
+    inicia a propria eleicao e se anuncia. Resultado: dois lideres ao mesmo tempo (split-brain)
+    ate o anuncio da agencia de maior ID chegar. Uma agencia que acredita ser lider nao verifica
+    ninguem no heartbeat (liderAtual == idAgencia), entao se esse anuncio se perder, ela pode
+    continuar errada indefinidamente.
+  - Na rede lenta, as eleicoes se repetem sem parar, gerando ainda mais trafego (efeito cascata).
+
+Mitigacoes: timeout maior ou adaptativo, exigir varias falhas consecutivas antes de declarar a
+lider morta, e (em sistemas reais) usar eleicao com "terms/epochs" para descartar lideres antigos.
+
+---
