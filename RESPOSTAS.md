@@ -305,3 +305,46 @@ depositar() e sacar(). Usa publicar() do mensageria.py - nao bloqueia a resposta
 
 **Por que nao exige consumidor dedicado:** o objetivo e demonstrar a publicacao. O
 CloudAMQP Manager confirma que a mensagem chega na exchange com a routing key correta.
+
+---
+
+# RESPOSTAS Sprint 3 - ICEIBank
+
+## Secao 5.5 - Perguntas sobre Eleicao e Coordenador (Algoritmo de Bully)
+
+### Pergunta 2
+**Mais de uma agencia declarou TORNOU_LIDER durante a subida. Isso e um bug ou comportamento esperado?**
+
+E comportamento esperado do algoritmo, nao um bug. Nos logs da minha execucao (horarios UTC,
+agencias subidas uma apos a outra, nesta ordem: 0, 1, 2):
+
+  04:59:07  [agencia-0] ELEICAO_INICIADA
+  04:59:12  [agencia-0] TORNOU_LIDER          <- ninguem maior respondeu (1 e 2 ainda nao estavam no ar)
+  04:59:36  [agencia-1] ELEICAO_INICIADA
+  04:59:38  [agencia-1] TORNOU_LIDER          <- a 2 ainda nao estava no ar
+  04:59:38  [agencia-0] LIDER_ANUNCIADO  liderId=1
+  04:59:49  [agencia-2] ELEICAO_INICIADA
+  04:59:49  [agencia-2] TORNOU_LIDER          <- nao existe ID maior que 2
+  04:59:50  [agencia-0] LIDER_ANUNCIADO  liderId=2
+  04:59:51  [agencia-1] LIDER_ANUNCIADO  liderId=2
+
+Foram tres TORNOU_LIDER (agencias 0, 1 e 2), e depois todas convergiram para a 2.
+
+**Por que acontece:** o Bully so exige que a agencia espere resposta de agencias com ID MAIOR.
+Quando a agencia 0 subiu, as agencias 1 e 2 nao responderam (fora do ar, ou ainda sem ouvir a porta),
+entao, pela regra do algoritmo, ela concluiu corretamente que era a maior agencia ATIVA e se
+declarou lider. Isso era verdade naquele momento. O mesmo vale para a agencia 1 minutos depois.
+Nenhuma das duas tinha como saber que uma agencia maior estava prestes a subir.
+
+**Por que converge:** quando a agencia 2 subiu, ela iniciou sua propria eleicao, nao encontrou ID
+maior, virou lider e enviou /bully/coordenador para as outras. Ao receber esse anuncio
+(LIDER_ANUNCIADO liderId=2), as agencias 0 e 1 sobrescreveram o lider anterior. Por isso a agencia 0
+registrou dois anuncios (liderId=1 e depois liderId=2), e as tres terminaram concordando com
+liderAtual = 2. Isso e a propriedade que o algoritmo garante: o resultado FINAL e sempre o maior ID
+ativo; o que nao e garantido e a ausencia de liderancas transitorias durante a subida.
+
+Em resumo: lideres transitorios sao um efeito colateral previsivel de agencias subindo em momentos
+diferentes. Bug seria o estado final divergente (agencias discordando da lider), o que nao ocorreu
+(as tres responderam liderAtual = 2 em /bully/lider).
+
+---
