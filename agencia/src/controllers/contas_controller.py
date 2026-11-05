@@ -17,12 +17,15 @@ Ordem de operacoes (identica ao Node - nao alterar):
 """
 
 import asyncio
+from typing import List
 
 from fastapi import APIRouter, Depends, HTTPException, Request
+from fastapi.responses import JSONResponse
 from pydantic import BaseModel
 
 from src import config
 from src.services.auth import get_usuario_atual
+from src.services.comparar_vetores import comparar_vetores
 from src.services.mensageria import publicar
 
 router = APIRouter()
@@ -89,7 +92,13 @@ def consultar_saldo(
     conta = request.app.state.contas.get(id)
     if conta is None:
         raise HTTPException(status_code=404, detail="Conta nao encontrada nesta agencia.")
-    return {"id": conta["id"], "nomeAluno": conta["nomeAluno"], "saldo": conta["saldo"]}
+    # Sprint 3 (Parte E): devolve tambem o vetor atual, para o app guardar (offline-first)
+    return {
+        "id": conta["id"],
+        "nomeAluno": conta["nomeAluno"],
+        "saldo": conta["saldo"],
+        "vetorAtual": request.app.state.relogio.obter_vetor_atual(),
+    }
 
 
 @router.post("/contas/{id}/depositar")
@@ -118,6 +127,80 @@ async def depositar(
     return {"id": conta["id"], "nomeAluno": conta["nomeAluno"], "saldo": conta["saldo"]}
 
 
+
+class SincronizarBody(BaseModel):
+    # tipo e str (nao Literal) para manter o contrato do enunciado: tipo desconhecido -> 400
+    # com a mensagem literal, e nao 422 do Pydantic.
+    tipo: str
+    valor: float
+    vetorConhecido: List[int]
+
+
+def _conta_publica(conta: dict) -> dict:
+    """Conta sem o campo senha (mesmo formato das demais rotas)."""
+    return {"id": conta["id"], "nomeAluno": conta["nomeAluno"], "saldo": conta["saldo"]}
+
+
+@router.post("/contas/{id}/sincronizar")
+def sincronizar_operacao_pendente(
+    id: int,
+    body: SincronizarBody,
+    request: Request,
+    _usuario=Depends(get_usuario_atual),
+):
+    """
+    Sprint 3 (Parte E): aplica uma operacao feita offline pelo app, SE o vetor que o app
+    conhecia ainda for igual ao vetor atual da agencia. Caso contrario, 409 com o estado atual.
+
+    Contrato (identico ao sincronizarOperacaoPendente do roteiro): erros usam a chave "erro"
+    e mensagens literais do enunciado.
+    """
+    contas = request.app.state.contas
+    relogio = request.app.state.relogio
+    registro = request.app.state.registro
+
+    conta = contas.get(id)
+    if conta is None:
+        return JSONResponse(status_code=404, content={"erro": "Conta não encontrada nesta agência."})
+
+    if len(body.vetorConhecido) != config.NUMERO_AGENCIAS:
+        return JSONResponse(status_code=400, content={"erro": "vetorConhecido inválido."})
+
+    # Trecho critico ATOMICO: comparar o vetor e aplicar a operacao sem que outra thread
+    # (consumidor RabbitMQ, Bully, heartbeat, outras requisicoes) avance o vetor no meio.
+    with relogio.travar():
+        vetor_atual = relogio.obter_vetor_atual()
+        relacao = comparar_vetores(body.vetorConhecido, vetor_atual)
+
+        if relacao != "IGUAIS":
+            # outras operacoes aconteceram na agencia desde a ultima sincronizacao do app:
+            # nao aplica cegamente, devolve o estado atual para o app decidir
+            return JSONResponse(
+                status_code=409,
+                content={
+                    "erro": "Conflito detectado: o estado da conta mudou desde a última sincronização do app.",
+                    "vetorConhecido": body.vetorConhecido,
+                    "vetorAtual": vetor_atual,
+                    "contaAtual": _conta_publica(conta),
+                },
+            )
+
+        if body.tipo == "DEPOSITO":
+            vetor = relogio.evento_local()
+            conta["saldo"] += body.valor
+        elif body.tipo == "SAQUE":
+            if conta["saldo"] < body.valor:
+                return JSONResponse(status_code=400, content={"erro": "Saldo insuficiente."})
+            vetor = relogio.evento_local()
+            conta["saldo"] -= body.valor
+        else:
+            return JSONResponse(status_code=400, content={"erro": "Tipo de operação pendente não suportado."})
+
+        registro.registrar("SINCRONIZACAO_OFFLINE", vetor, {"id": id, "tipo": body.tipo, "valor": body.valor})
+        return _conta_publica(conta)
+
+
+
 @router.post("/contas/{id}/sacar")
 async def sacar(
     id: int,
@@ -144,3 +227,149 @@ async def sacar(
     await _verificar_saldo_baixo(id, conta["saldo"], id_agencia)
 
     return {"id": conta["id"], "nomeAluno": conta["nomeAluno"], "saldo": conta["saldo"]}
+
+
+class SincronizarBody(BaseModel):
+    # tipo e str (nao Literal) para manter o contrato do enunciado: tipo desconhecido -> 400
+    # com a mensagem literal, e nao 422 do Pydantic.
+    tipo: str
+    valor: float
+    vetorConhecido: List[int]
+
+
+def _conta_publica(conta: dict) -> dict:
+    """Conta sem o campo senha (mesmo formato das demais rotas)."""
+    return {"id": conta["id"], "nomeAluno": conta["nomeAluno"], "saldo": conta["saldo"]}
+
+
+@router.post("/contas/{id}/sincronizar")
+def sincronizar_operacao_pendente(
+    id: int,
+    body: SincronizarBody,
+    request: Request,
+    _usuario=Depends(get_usuario_atual),
+):
+    """
+    Sprint 3 (Parte E): aplica uma operacao feita offline pelo app, SE o vetor que o app
+    conhecia ainda for igual ao vetor atual da agencia. Caso contrario, 409 com o estado atual.
+
+    Contrato (identico ao sincronizarOperacaoPendente do roteiro): erros usam a chave "erro"
+    e mensagens literais do enunciado.
+    """
+    contas = request.app.state.contas
+    relogio = request.app.state.relogio
+    registro = request.app.state.registro
+
+    conta = contas.get(id)
+    if conta is None:
+        return JSONResponse(status_code=404, content={"erro": "Conta nÃ£o encontrada nesta agÃªncia."})
+
+    if len(body.vetorConhecido) != config.NUMERO_AGENCIAS:
+        return JSONResponse(status_code=400, content={"erro": "vetorConhecido invÃ¡lido."})
+
+    # Trecho critico ATOMICO: comparar o vetor e aplicar a operacao sem que outra thread
+    # (consumidor RabbitMQ, Bully, heartbeat, outras requisicoes) avance o vetor no meio.
+    with relogio.travar():
+        vetor_atual = relogio.obter_vetor_atual()
+        relacao = comparar_vetores(body.vetorConhecido, vetor_atual)
+
+        if relacao != "IGUAIS":
+            # outras operacoes aconteceram na agencia desde a ultima sincronizacao do app:
+            # nao aplica cegamente, devolve o estado atual para o app decidir
+            return JSONResponse(
+                status_code=409,
+                content={
+                    "erro": "Conflito detectado: o estado da conta mudou desde a Ãºltima sincronizaÃ§Ã£o do app.",
+                    "vetorConhecido": body.vetorConhecido,
+                    "vetorAtual": vetor_atual,
+                    "contaAtual": _conta_publica(conta),
+                },
+            )
+
+        if body.tipo == "DEPOSITO":
+            vetor = relogio.evento_local()
+            conta["saldo"] += body.valor
+        elif body.tipo == "SAQUE":
+            if conta["saldo"] < body.valor:
+                return JSONResponse(status_code=400, content={"erro": "Saldo insuficiente."})
+            vetor = relogio.evento_local()
+            conta["saldo"] -= body.valor
+        else:
+            return JSONResponse(status_code=400, content={"erro": "Tipo de operaÃ§Ã£o pendente nÃ£o suportado."})
+
+        registro.registrar("SINCRONIZACAO_OFFLINE", vetor, {"id": id, "tipo": body.tipo, "valor": body.valor})
+        return _conta_publica(conta)
+
+
+
+class SincronizarBody(BaseModel):
+    # tipo e str (nao Literal) para manter o contrato do enunciado: tipo desconhecido -> 400
+    # com a mensagem literal, e nao 422 do Pydantic.
+    tipo: str
+    valor: float
+    vetorConhecido: List[int]
+
+
+def _conta_publica(conta: dict) -> dict:
+    """Conta sem o campo senha (mesmo formato das demais rotas)."""
+    return {"id": conta["id"], "nomeAluno": conta["nomeAluno"], "saldo": conta["saldo"]}
+
+
+@router.post("/contas/{id}/sincronizar")
+def sincronizar_operacao_pendente(
+    id: int,
+    body: SincronizarBody,
+    request: Request,
+    _usuario=Depends(get_usuario_atual),
+):
+    """
+    Sprint 3 (Parte E): aplica uma operacao feita offline pelo app, SE o vetor que o app
+    conhecia ainda for igual ao vetor atual da agencia. Caso contrario, 409 com o estado atual.
+
+    Contrato (identico ao sincronizarOperacaoPendente do roteiro): erros usam a chave "erro"
+    e mensagens literais do enunciado.
+    """
+    contas = request.app.state.contas
+    relogio = request.app.state.relogio
+    registro = request.app.state.registro
+
+    conta = contas.get(id)
+    if conta is None:
+        return JSONResponse(status_code=404, content={"erro": "Conta não encontrada nesta agência."})
+
+    if len(body.vetorConhecido) != config.NUMERO_AGENCIAS:
+        return JSONResponse(status_code=400, content={"erro": "vetorConhecido inválido."})
+
+    # Trecho critico ATOMICO: comparar o vetor e aplicar a operacao sem que outra thread
+    # (consumidor RabbitMQ, Bully, heartbeat, outras requisicoes) avance o vetor no meio.
+    with relogio.travar():
+        vetor_atual = relogio.obter_vetor_atual()
+        relacao = comparar_vetores(body.vetorConhecido, vetor_atual)
+
+        if relacao != "IGUAIS":
+            # outras operacoes aconteceram na agencia desde a ultima sincronizacao do app:
+            # nao aplica cegamente, devolve o estado atual para o app decidir
+            return JSONResponse(
+                status_code=409,
+                content={
+                    "erro": "Conflito detectado: o estado da conta mudou desde a última sincronização do app.",
+                    "vetorConhecido": body.vetorConhecido,
+                    "vetorAtual": vetor_atual,
+                    "contaAtual": _conta_publica(conta),
+                },
+            )
+
+        if body.tipo == "DEPOSITO":
+            vetor = relogio.evento_local()
+            conta["saldo"] += body.valor
+        elif body.tipo == "SAQUE":
+            if conta["saldo"] < body.valor:
+                return JSONResponse(status_code=400, content={"erro": "Saldo insuficiente."})
+            vetor = relogio.evento_local()
+            conta["saldo"] -= body.valor
+        else:
+            return JSONResponse(status_code=400, content={"erro": "Tipo de operação pendente não suportado."})
+
+        registro.registrar("SINCRONIZACAO_OFFLINE", vetor, {"id": id, "tipo": body.tipo, "valor": body.valor})
+        return _conta_publica(conta)
+

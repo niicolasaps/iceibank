@@ -30,7 +30,25 @@ class RelogioVetorial:
         self.id_agencia = id_agencia
         self.numero_agencias = numero_agencias
         self.vetor: List[int] = [0] * numero_agencias
-        self._lock = threading.Lock()
+        self._lock = threading.RLock()
+
+    def travar(self):
+        """
+        Sprint 3 (Parte E): devolve o lock do relogio para uso em `with relogio.travar():`.
+        Permite executar "comparar vetores + aplicar operacao" de forma atomica: enquanto o
+        lock esta preso, nenhuma outra thread (consumidor RabbitMQ, Bully, heartbeat, outras
+        requisicoes) consegue avancar o vetor. E um RLock (reentrante) para que, dentro do
+        bloco, as proprias chamadas evento_local()/obter_vetor_atual() nao travem.
+        """
+        return self._lock
+
+    def obter_vetor_atual(self) -> List[int]:
+        """
+        Sprint 3 (Parte E): equivalente ao obterVetorAtual() do roteiro.
+        Le o vetor SEM incrementar (copia, sob o lock do relogio).
+        """
+        with self._lock:
+            return list(self.vetor)
 
     def evento_local(self) -> List[int]:
         """
