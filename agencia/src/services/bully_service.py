@@ -16,9 +16,15 @@ NOTA DE THREAD-SAFETY:
   rodam em threads diferentes. Por isso lider_atual e eleicao_em_andamento sao protegidos
   por threading.Lock. O lock NUNCA e mantido durante chamadas HTTP (evita travar a agencia).
 
-Constantes ficam no topo do modulo (facilita torna-las configuraveis por env var depois).
+Constantes ficam no topo do modulo.
+
+Funcionalidade adicional (Sprint 3, secao 2.1) - Timeout configuravel:
+  BULLY_HEARTBEAT_MS : intervalo do heartbeat em ms (padrao 3000)
+  BULLY_TIMEOUT_MS   : timeout das chamadas HTTP do Bully em ms (padrao 1000)
+  Valor ausente, nao numerico ou <= 0 -> usa o padrao e avisa no console.
 """
 
+import os
 import threading
 import time
 from typing import List, Optional
@@ -29,13 +35,35 @@ from src import config
 from src.services.event_log import RegistroEventos
 from src.services.vector_clock import RelogioVetorial
 
-# --- Constantes (equivalente a TIMEOUT_MS = 1000 do Node) ---
-TIMEOUT_S: float = 1.0
+
+def _ler_ms_do_ambiente(nome: str, padrao_ms: int) -> float:
+    """
+    Le uma variavel de ambiente em milissegundos e devolve o valor em SEGUNDOS.
+    Ausente -> padrao (silencioso). Invalida (nao inteira ou <= 0) -> padrao + aviso.
+    """
+    bruto = os.environ.get(nome)
+    if bruto is None or bruto.strip() == "":
+        return padrao_ms / 1000
+    try:
+        valor_ms = int(bruto)
+        if valor_ms <= 0:
+            raise ValueError
+    except ValueError:
+        print(f"[Bully] AVISO: {nome}='{bruto}' invalido (esperado inteiro > 0, em ms). Usando padrao {padrao_ms} ms.")
+        return padrao_ms / 1000
+    return valor_ms / 1000
+
+
+# --- Constantes ---
+# Timeout das chamadas HTTP do Bully (equivalente a TIMEOUT_MS = 1000 do Node).
+TIMEOUT_S: float = _ler_ms_do_ambiente("BULLY_TIMEOUT_MS", 1000)
 # Pequena espera antes da eleicao inicial: o startup do FastAPI roda ANTES do socket
 # ser aberto, entao damos tempo ao servidor para comecar a ouvir (ver main.py).
 ATRASO_INICIAL_S: float = 1.0
-# Parte B: intervalo padrao do heartbeat (equivalente a intervaloMs = 3000 do Node).
-INTERVALO_HEARTBEAT_S: float = 3.0
+# Parte B: intervalo do heartbeat (equivalente a intervaloMs = 3000 do Node).
+INTERVALO_HEARTBEAT_S: float = _ler_ms_do_ambiente("BULLY_HEARTBEAT_MS", 3000)
+
+print(f"[Bully] Configuracao: heartbeat={INTERVALO_HEARTBEAT_S * 1000:.0f} ms, timeout={TIMEOUT_S * 1000:.0f} ms")
 
 
 class ServicoBully:

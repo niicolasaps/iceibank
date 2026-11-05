@@ -414,3 +414,34 @@ Mitigacoes: timeout maior ou adaptativo, exigir varias falhas consecutivas antes
 lider morta, e (em sistemas reais) usar eleicao com "terms/epochs" para descartar lideres antigos.
 
 ---
+## Funcionalidade Adicional Sprint 3 - Timeout Configuravel
+
+**O que faz:** o intervalo do heartbeat e o timeout das chamadas HTTP do Bully deixam de ser
+fixos no codigo e passam a ser lidos de variaveis de ambiente, em milissegundos:
+
+  BULLY_HEARTBEAT_MS  - intervalo entre verificacoes da lider (padrao: 3000)
+  BULLY_TIMEOUT_MS    - timeout de cada chamada /bully/* entre agencias (padrao: 1000)
+
+**Validacao:** se a variavel nao estiver definida, o padrao e usado em silencio. Se o valor
+for invalido (nao numerico, zero ou negativo), o padrao e usado e um aviso aparece no console:
+  [Bully] AVISO: BULLY_TIMEOUT_MS='abc' invalido (esperado inteiro > 0, em ms). Usando padrao 1000 ms.
+Ao subir, cada agencia imprime a configuracao efetiva:
+  [Bully] Configuracao: heartbeat=3000 ms, timeout=1000 ms
+
+**Exemplo (PowerShell):**
+  $env:BULLY_HEARTBEAT_MS="1000"; $env:BULLY_TIMEOUT_MS="500"
+  python -m uvicorn src.main:app --port 4046
+
+**Por que foi escolhida:** as perguntas 6.4.1 e 6.4.3 discutem exatamente o trade-off entre
+intervalo curto/longo e timeout curto/longo. Com a configuracao por ambiente, e possivel
+reproduzir esses cenarios sem editar codigo: heartbeat de 500 ms detecta a queda mais rapido
+(mais trafego), e um timeout muito baixo provoca falsos positivos de "lider nao respondeu".
+Tambem permite acelerar a demonstracao do failover em sala.
+
+**Implementacao:** _ler_ms_do_ambiente() e as constantes TIMEOUT_S e INTERVALO_HEARTBEAT_S
+no topo de bully_service.py. As variaveis sao lidas uma unica vez, na subida do processo;
+mudar o valor exige reiniciar a agencia.
+
+**Evidencia:** evidencias/sprint3/funcionalidade-adicional.png
+
+---
