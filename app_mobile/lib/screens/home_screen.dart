@@ -5,6 +5,7 @@ import '../providers/auth_provider.dart';
 import '../providers/conta_provider.dart';
 import '../providers/lider_provider.dart';
 import '../services/api_client.dart';
+import '../services/banco_local.dart';
 import 'painel_lider.dart';
 
 /// Tela principal: painel de lideranca + saldo + deposito/saque + transferencia.
@@ -18,7 +19,7 @@ class HomeScreen extends StatelessWidget {
     return MultiProvider(
       providers: [
         ChangeNotifierProvider<ContaProvider>(
-          create: (_) => ContaProvider(api, idConta)..atualizar(),
+          create: (_) => ContaProvider(api, idConta), // carrega cache, atualiza e sincroniza sozinho
         ),
         ChangeNotifierProvider<LiderProvider>(
           create: (_) => LiderProvider(api)..iniciar(),
@@ -87,9 +88,14 @@ class _HomeConteudoState extends State<_HomeConteudo> {
           children: [
             const PainelLider(),
             const SizedBox(height: 16),
+            if (conta.offline) _bannerOffline(conta),
             _cartaoSaldo(conta),
             if (conta.erro != null) _caixa(conta.erro!, Colors.red),
             if (conta.sucesso != null) _caixa(conta.sucesso!, Colors.green),
+            if (conta.pendentes.isNotEmpty) ...[
+              const SizedBox(height: 8),
+              _cartaoPendentes(conta),
+            ],
             const SizedBox(height: 8),
             _cartaoDepositoSaque(conta),
             const SizedBox(height: 16),
@@ -101,6 +107,9 @@ class _HomeConteudoState extends State<_HomeConteudo> {
   }
 
   Widget _cartaoSaldo(ContaProvider conta) {
+    final provisorio = conta.saldoProvisorio;
+    final qtd = conta.quantidadePendentes;
+    final temPendente = qtd > 0;
     return Card(
       child: Padding(
         padding: const EdgeInsets.all(16),
@@ -110,15 +119,165 @@ class _HomeConteudoState extends State<_HomeConteudo> {
             Text(conta.nomeAluno ?? '...', style: Theme.of(context).textTheme.titleMedium),
             const SizedBox(height: 8),
             Text(
-              conta.saldo == null ? '--' : 'R\$ ${conta.saldo!.toStringAsFixed(2)}',
-              style: Theme.of(context).textTheme.headlineMedium?.copyWith(fontWeight: FontWeight.bold),
+              provisorio == null ? '--' : _reais(provisorio),
+              style: Theme.of(context).textTheme.headlineMedium?.copyWith(
+                    fontWeight: FontWeight.bold,
+                    color: temPendente ? Colors.orange.shade800 : null,
+                  ),
             ),
-            if (conta.ocupado) const Padding(padding: EdgeInsets.only(top: 8), child: LinearProgressIndicator()),
+            if (temPendente) ...[
+              const SizedBox(height: 6),
+              Row(
+                children: [
+                  Icon(Icons.schedule, size: 18, color: Colors.orange.shade800),
+                  const SizedBox(width: 6),
+                  Expanded(
+                    child: Text(
+                      'Saldo provisorio: $qtd operacao(oes) pendente(s) de sincronizacao',
+                      style: TextStyle(color: Colors.orange.shade800, fontWeight: FontWeight.w600),
+                    ),
+                  ),
+                ],
+              ),
+              if (conta.saldoConfirmado != null)
+                Text('Saldo confirmado pela agencia: ${_reais(conta.saldoConfirmado!)}'),
+            ],
+            if (conta.offline && conta.atualizadoEm != null)
+              Padding(
+                padding: const EdgeInsets.only(top: 4),
+                child: Text('Ultimo dado conhecido: ${_dataHora(conta.atualizadoEm!)}',
+                    style: Theme.of(context).textTheme.bodySmall),
+              ),
+            if (conta.ocupado || conta.sincronizando)
+              const Padding(padding: EdgeInsets.only(top: 8), child: LinearProgressIndicator()),
           ],
         ),
       ),
     );
   }
+
+  Widget _bannerOffline(ContaProvider conta) {
+    return Container(
+      margin: const EdgeInsets.only(bottom: 8),
+      padding: const EdgeInsets.all(12),
+      decoration: BoxDecoration(
+        color: Colors.blueGrey.withValues(alpha: 0.15),
+        border: Border.all(color: Colors.blueGrey),
+        borderRadius: BorderRadius.circular(8),
+      ),
+      child: const Row(
+        children: [
+          Icon(Icons.cloud_off, color: Colors.blueGrey),
+          SizedBox(width: 10),
+          Expanded(
+            child: Text(
+              'Sem conexao com a agencia. Mostrando o ultimo saldo salvo. Depositos e saques ficam '
+              'PENDENTES e serao sincronizados automaticamente quando a conexao voltar.',
+            ),
+          ),
+        ],
+      ),
+    );
+  }
+
+  Widget _cartaoPendentes(ContaProvider conta) {
+    return Card(
+      child: Padding(
+        padding: const EdgeInsets.all(16),
+        child: Column(
+          crossAxisAlignment: CrossAxisAlignment.start,
+          children: [
+            Text('Operacoes feitas offline', style: Theme.of(context).textTheme.titleMedium),
+            const SizedBox(height: 8),
+            for (final op in conta.pendentes) _itemPendente(conta, op),
+          ],
+        ),
+      ),
+    );
+  }
+
+  Widget _itemPendente(ContaProvider conta, OperacaoPendente op) {
+    final nome = op.tipo == 'DEPOSITO' ? 'Deposito' : 'Saque';
+    final descricao = '$nome de ${_reais(op.valor)}';
+
+    if (op.status == StatusPendente.pendente) {
+      return ListTile(
+        contentPadding: EdgeInsets.zero,
+        leading: Icon(Icons.schedule, color: Colors.orange.shade800),
+        title: Text(descricao),
+        subtitle: Text('Pendente de sincronizacao - feita as ${_hora(op.criadoEm)}'),
+      );
+    }
+
+    final conflito = op.status == StatusPendente.conflito;
+    return Container(
+      margin: const EdgeInsets.only(bottom: 8),
+      padding: const EdgeInsets.all(12),
+      decoration: BoxDecoration(
+        color: Colors.red.withValues(alpha: 0.08),
+        border: Border.all(color: Colors.red),
+        borderRadius: BorderRadius.circular(8),
+      ),
+      child: Column(
+        crossAxisAlignment: CrossAxisAlignment.start,
+        children: [
+          Row(
+            children: [
+              Icon(conflito ? Icons.sync_problem : Icons.block, color: Colors.red),
+              const SizedBox(width: 8),
+              Expanded(
+                child: Text(
+                  '${conflito ? 'CONFLITO' : 'RECUSADA'}: $descricao',
+                  style: const TextStyle(fontWeight: FontWeight.bold, color: Colors.red),
+                ),
+              ),
+            ],
+          ),
+          const SizedBox(height: 6),
+          if (op.mensagem != null) Text(op.mensagem!),
+          if (op.saldoReal != null) ...[
+            const SizedBox(height: 4),
+            Text('Saldo real atual na agencia: ${_reais(op.saldoReal!)}',
+                style: const TextStyle(fontWeight: FontWeight.w600)),
+          ],
+          const SizedBox(height: 4),
+          Text(
+            conflito
+                ? 'A operacao nao foi aplicada. As demais pendentes aguardam sua decisao.'
+                : 'A agencia recusou a operacao. As demais pendentes aguardam sua decisao.',
+            style: Theme.of(context).textTheme.bodySmall,
+          ),
+          const SizedBox(height: 8),
+          Row(
+            children: [
+              if (conflito)
+                Expanded(
+                  child: FilledButton(
+                    onPressed: conta.ocupado || conta.sincronizando ? null : () => conta.aplicarMesmoAssim(op),
+                    child: const Text('Aplicar mesmo assim'),
+                  ),
+                ),
+              if (conflito) const SizedBox(width: 8),
+              Expanded(
+                child: OutlinedButton(
+                  onPressed: conta.ocupado || conta.sincronizando ? null : () => conta.descartar(op),
+                  child: const Text('Descartar'),
+                ),
+              ),
+            ],
+          ),
+        ],
+      ),
+    );
+  }
+
+  String _reais(double v) => 'R\$ ${v.toStringAsFixed(2)}';
+
+  String _dois(int n) => n.toString().padLeft(2, '0');
+
+  String _hora(DateTime d) => '${_dois(d.hour)}:${_dois(d.minute)}:${_dois(d.second)}';
+
+  String _dataHora(DateTime d) => '${_dois(d.day)}/${_dois(d.month)} ${_hora(d)}';
 
   Widget _cartaoDepositoSaque(ContaProvider conta) {
     return Card(

@@ -14,7 +14,10 @@ class ApiException implements Exception {
   /// true quando nao foi possivel falar com a agencia (timeout / conexao recusada).
   final bool semConexao;
 
-  ApiException(this.mensagem, {this.status, this.semConexao = false});
+  /// Corpo JSON da resposta de erro (ex.: o 409 do /sincronizar traz contaAtual e vetorAtual).
+  final dynamic dados;
+
+  ApiException(this.mensagem, {this.status, this.semConexao = false, this.dados});
 
   @override
   String toString() => mensagem;
@@ -76,7 +79,7 @@ class ApiClient {
       throw ApiException('Nao autorizado. Faca login novamente.', status: 401);
     }
     throw ApiException(_extrairMensagem(dados, resposta.statusCode),
-        status: resposta.statusCode);
+        status: resposta.statusCode, dados: dados);
   }
 
   /// O backend devolve erros como {"detail": "..."} (FastAPI) ou {"erro": "..."}.
@@ -130,6 +133,15 @@ class ApiClient {
     final dados = await _requisitar('POST', _baseDaConta(idOrigem), '/transferencias',
         corpo: {'idOrigem': idOrigem, 'idDestino': idDestino, 'valor': valor});
     return (dados as Map)['mensagem'] as String? ?? 'Transferencia realizada.';
+  }
+
+  /// Parte E/F: POST /contas/{id}/sincronizar {tipo, valor, vetorConhecido}.
+  /// 200 -> conta atualizada; 409 -> ApiException com dados = {erro, vetorConhecido, vetorAtual, contaAtual}.
+  Future<Map<String, dynamic>> sincronizar(
+      int idConta, String tipo, double valor, List<int> vetorConhecido) async {
+    final dados = await _requisitar('POST', _baseDaConta(idConta), '/contas/$idConta/sincronizar',
+        corpo: {'tipo': tipo, 'valor': valor, 'vetorConhecido': vetorConhecido});
+    return Map<String, dynamic>.from(dados as Map);
   }
 
   // --- Bully (sem JWT, como no backend) ---

@@ -21,6 +21,10 @@ class Config {
   /// Intervalo do polling do painel de lideranca (igual ao heartbeat padrao do backend).
   static const Duration intervaloPolling = Duration(seconds: 3);
 
+  /// Parte F: enquanto houver operacoes pendentes, tenta sincronizar a cada intervalo
+  /// (complementa o evento de reconexao do connectivity_plus).
+  static const Duration intervaloSincronizacao = Duration(seconds: 5);
+
   /// Particionamento do backend: a conta N pertence a agencia N % 3.
   static int agenciaDaConta(int idConta) => idConta % agencias.length;
 }
