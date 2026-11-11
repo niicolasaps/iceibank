@@ -9,6 +9,7 @@ class AuthProvider extends ChangeNotifier {
   final FlutterSecureStorage _storage = const FlutterSecureStorage();
 
   int? idConta;
+  int? agenciaAtiva;
   bool carregando = true; // true enquanto le o token salvo no startup
   String? mensagemSessao; // ex.: "Sessao expirada" - mostrada na tela de login
 
@@ -23,9 +24,12 @@ class AuthProvider extends ChangeNotifier {
     try {
       final token = await _storage.read(key: 'token');
       final id = await _storage.read(key: 'idConta');
+      final ag = await _storage.read(key: 'agenciaAtiva');
       if (token != null && id != null) {
         api.token = token;
         idConta = int.tryParse(id);
+        agenciaAtiva = ag != null ? int.tryParse(ag) : null;
+        api.agenciaSelecionada = agenciaAtiva;
       }
     } catch (_) {
       // storage indisponivel: segue deslogado
@@ -34,21 +38,29 @@ class AuthProvider extends ChangeNotifier {
     notifyListeners();
   }
 
-  Future<void> login(int id, String senha) async {
+  Future<void> login(int id, String senha, {int? agenciaIdx}) async {
     mensagemSessao = null;
+    api.agenciaSelecionada = agenciaIdx;
     final token = await api.login(id, senha); // lanca ApiException em caso de erro
     api.token = token;
     idConta = id;
+    agenciaAtiva = agenciaIdx;
     await _storage.write(key: 'token', value: token);
     await _storage.write(key: 'idConta', value: id.toString());
+    if (agenciaIdx != null) {
+      await _storage.write(key: 'agenciaAtiva', value: agenciaIdx.toString());
+    }
     notifyListeners();
   }
 
   Future<void> logout() async {
     api.token = null;
+    api.agenciaSelecionada = null;
     idConta = null;
+    agenciaAtiva = null;
     await _storage.delete(key: 'token');
     await _storage.delete(key: 'idConta');
+    await _storage.delete(key: 'agenciaAtiva');
     notifyListeners();
   }
 

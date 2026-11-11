@@ -1,15 +1,16 @@
-# GUIA DE EXECUCAO -- ICEIBank Sprint 2
+# GUIA DE EXECUCAO -- ICEIBank Sprint 3
 
 ---
 
-# PARTE A -- DEMONSTRACAO PARA O PROFESSOR (DEPLOY NA NUVEM)
+# PARTE A -- DEMONSTRACAO PARA O PROFESSOR (DEPLOY NA NUVEM + APP MOBILE)
 
-Use esta parte no computador do laboratorio.
-Nao precisa instalar nada. So navegador e PowerShell.
+Use esta parte no computador do laboratorio ou na sua apresentacao.
+As Demonstracoes 1 a 5 podem ser feitas na nuvem (Render + Vercel) apenas com navegador e PowerShell.
+As Demonstracoes 6 a 10 (Sprint 3: Bully com failover ao vivo, App Flutter e Offline-First) tambem tem os comandos prontos tanto para nuvem quanto localmente.
 
 ---
 
-## A.1 -- Acordar as agencias (2 minutos antes de mostrar)
+## A.1 -- Acordar as agencias no Render (2 minutos antes de mostrar)
 
 As agencias no Render dormem quando ficam sem uso.
 Abra estas 3 abas no navegador e espere cada uma responder:
@@ -18,9 +19,15 @@ Abra estas 3 abas no navegador e espere cada uma responder:
   https://iceibank-agencia-1.onrender.com/status
   https://iceibank-agencia-2.onrender.com/status
 
-O que deve aparecer: agencia: 0, relogioVetorialAtual: [0,0,0], quantidadeContas: 0
+E confira tambem a eleicao de lider (Sprint 3) nas 3:
 
->> ATENCAO: pode demorar ate 60 segundos.
+  https://iceibank-agencia-0.onrender.com/bully/lider
+  https://iceibank-agencia-1.onrender.com/bully/lider
+  https://iceibank-agencia-2.onrender.com/bully/lider
+
+O que deve aparecer em `/bully/lider`: `{"idAgencia": X, "liderAtual": 2}` (todas concordando com a Agencia 2 como lider).
+
+>> ATENCAO: pode demorar ate 60 segundos para acordar o free tier do Render.
 >> Se aparecer Service Unavailable, aguarde 30s e recarregue.
 
 ---
@@ -33,186 +40,143 @@ Abra o PowerShell (tecla Windows, PowerShell, Enter). Cole cada linha:
     Invoke-RestMethod -Method Post -Uri "https://iceibank-agencia-1.onrender.com/auth/bootstrap" -ContentType "application/json" -Body '{"idConta":1,"senha":"demo123"}'
     Invoke-RestMethod -Method Post -Uri "https://iceibank-agencia-2.onrender.com/auth/bootstrap" -ContentType "application/json" -Body '{"idConta":2,"senha":"demo123"}'
 
-Deve aparecer: Conta X criada com senha.
-Se aparecer Conta ja existe: normal, pode continuar.
+Deve aparecer: `Conta X criada com senha.`
+Se aparecer `Senha da conta X definida com sucesso`: normal, pode continuar.
 
 ---
 
-## A.3 -- Abrir o frontend
+## A.3 -- Abrir o frontend web (Vercel)
 
-Abra no navegador a URL do Vercel do projeto.
+Abra no navegador: https://iceibank.vercel.app
   - Agencia: Agencia 0 (Render)
   - ID da Conta: 0 | Senha: demo123
   - Clique em Acessar Conta
 
 ---
 
-## A.4 -- ROTEIRO DE DEMONSTRACAO PARA O PROFESSOR
+## A.4 -- ROTEIRO DE DEMONSTRACAO PARA O PROFESSOR (Sprints 1, 2 e 3)
 
-### Demo 1 -- Operacoes basicas e relogio vetorial subindo
+### Demo 1 -- Operacoes basicas e relogio vetorial subindo (Sprints 1 e 2)
 
 PASSO 1: Frontend > Depositar | ID: 0, Valor: 500 > Confirmar
-PASSO 2: Consultar Saldo | ID: 0 -- deve mostrar R$ 500,00
+PASSO 2: Consultar Saldo | ID: 0 -- deve mostrar R$ 500,00 (e o endpoint agora devolve `vetorAtual` junto!)
 PASSO 3: Nova aba: https://iceibank-agencia-0.onrender.com/status
-  Observe relogioVetorialAtual -- deve mostrar [2, 0, 0]
-
-  O que explica para o professor:
-  Cada operacao avanca o relogio vetorial. Comecou em [0,0,0]
-  e agora esta em [2,0,0]: fizemos 2 operacoes.
+  Observe `relogioVetorialAtual` avançando a cada evento.
 
 ---
 
-### Demo 2 -- Relogio Vetorial em acao (transferencia entre agencias)
-
-ANTES -- anote os vetores:
-  https://iceibank-agencia-0.onrender.com/status  (ex: [2, 0, 0])
-  https://iceibank-agencia-1.onrender.com/status  (ex: [0, 0, 0])
+### Demo 2 -- Relogio Vetorial + RabbitMQ em acao (Sprint 2)
 
 TRANSFERENCIA no frontend:
   Transferencia | ID Origem: 0 | ID Destino: 1 | Valor: 100 > Confirmar
-  Mensagem esperada: Transferencia publicada para a agencia de destino
+  Mensagem esperada: `Transferencia publicada para a agencia de destino (entrega assincrona).`
 
-DEPOIS -- recarregue os status:
-  Agencia 0: vetor mudou para ex: [4, 0, 0]
-    (subiu: registrou o debito e o envio da mensagem)
-  Aguarde 3 segundos. Agencia 1: vetor mudou para ex: [4, 1, 0]
-    (absorveu o vetor da Ag0 e incrementou o proprio)
+Recarregue `/status` nas agencias 0 e 1 apos 3 segundos:
+  A Agencia 1 absorveu o vetor da Agencia 0 via RabbitMQ (`max` componente a componente + 1 na propria posicao).
+
+---
+
+### Demo 3 -- Eleicao de Lider com Algoritmo de Bully (Sprint 3 - Parte A)
+
+No PowerShell (funciona no Render ou em `http://localhost:4046..4048`):
+
+    Get-Date
+    Invoke-RestMethod -Uri "http://localhost:4046/bully/lider" -Method Get
+    Invoke-RestMethod -Uri "http://localhost:4047/bully/lider" -Method Get
+    Invoke-RestMethod -Uri "http://localhost:4048/bully/lider" -Method Get
 
   O que explica para o professor:
-  A Agencia 1 tem 4 na posicao 0: ela sabe tudo que Ag0 fez ate o evento 4.
-  O relogio vetorial sincronizou as duas via mensagem RabbitMQ.
+  "Ao subir, cada agencia dispara `iniciar_eleicao()` em background enviando `POST /bully/eleicao`
+  para as agencias de ID maior. Como a Agencia 2 tem o maior ID ativo, ninguem maior responde a ela;
+  ela vence, se declara `TORNOU_LIDER` e anuncia `POST /bully/coordenador` para as agencias 0 e 1.
+  Todas as 3 convergem para `liderAtual = 2`."
 
 ---
 
-### Demo 3 -- Como ler o vetor
+### Demo 4 -- Heartbeat e Failover Automatico (Sprint 3 - Parte B)
 
-Exemplo: Agencia 1 com vetor [4, 1, 0]
-  Posicao 0 = 4  -> Ag1 sabe que Ag0 fez 4 eventos
-  Posicao 1 = 1  -> Ag1 fez 1 evento proprio (processar o credito)
-  Posicao 2 = 0  -> Ag1 nunca viu nada da Ag2
+PASSO 1: No Terminal 3 (Agencia 2, porta 4048), aperte `Ctrl+C` para derrubar a lider.
+PASSO 2: Aguarde ~4 segundos (o heartbeat roda a cada 3 segundos por padrao, com timeout de 1s).
+PASSO 3: Consulte as duas agencias vivas:
 
----
+    Get-Date
+    Invoke-RestMethod -Uri "http://localhost:4046/bully/lider" -Method Get
+    Invoke-RestMethod -Uri "http://localhost:4047/bully/lider" -Method Get
 
-### Demo 4 -- Alerta de Saldo Baixo (funcionalidade adicional)
+  Resultado esperado: ambas agora mostram `liderAtual = 1` automaticamente!
+  Nos terminais das agencias 0 e 1 aparece `LIDER_NAO_RESPONDEU`, seguido de nova eleicao e `TORNOU_LIDER` na Agencia 1.
 
-Frontend > Sacar | ID: 0, Valor: 460 > Confirmar (saldo fica abaixo R$ 50)
-Sistema publica automaticamente agencia.0.alerta-saldo-baixo no RabbitMQ.
-Voce pode ver no CloudAMQP Manager: https://www.cloudamqp.com/
-
----
+PASSO 4: Suba a Agencia 2 novamente no Terminal 3. Em poucos segundos ela inicia eleicao ao subir e retoma a lideranca (`liderAtual = 2`).
 
 ---
 
-### Demo 5 -- Linha do tempo causal (mesclar_logs.py)
+### Demo 5 -- Historico de Liderancas (Sprint 3 - Parte C)
 
-Abra o PowerShell e rode:
+No PowerShell:
 
     cd C:\Users\Nicolas\Desktop\iceibank\agencia
-    Write-Host "Executado em: $(Get-Date -Format 'dd/MM/yyyy HH:mm:ss')"
-    python mesclar_logs.py
+    Get-Date
+    .\.venv\Scripts\python.exe historico_lideranca.py
 
-O que deve aparecer:
+  O que deve aparecer:
+  1. `=== Histórico de eventos de eleição ===`: todos os eventos `ELEICAO_INICIADA`, `ELEICAO_RECEBIDA`, `TORNOU_LIDER`, `LIDER_ANUNCIADO` e `LIDER_NAO_RESPONDEU` das 3 agencias ordenados por `horaParede`.
+  2. `=== Linha do tempo de líderes ===`: mostra a sequencia exata de quem assumiu a lideranca na subida inicial (0 -> 1 -> 2), no failover apos a queda da 2 (-> 1) e na volta da 2 (-> 2).
 
-1. SECAO "Linha do tempo (ordenada por hora de parede)":
-   Lista todos os eventos de todas as agencias em ordem cronologica.
-   Cada linha mostra: [agencia] vetor=[x,y,z] TIPO_EVENTO {detalhes}
+---
 
-   Exemplo:
-     [agencia-0] vetor=[1, 0, 0] DEPOSITO {"id": 0, "valor": 500.0}
-     [agencia-1] vetor=[0, 1, 0] DEPOSITO {"id": 1, "valor": 300.0}
+### Demo 6 -- Funcionalidade Adicional Sprint 3: Timeout e Heartbeat Configuraveis
 
-2. SECAO "Pares de eventos CONCORRENTES entre agencias diferentes":
-   Lista os pares de eventos que aconteceram de forma INDEPENDENTE,
-   sem relacao causal entre si.
+Suba uma agencia definindo `BULLY_HEARTBEAT_MS` e `BULLY_TIMEOUT_MS` por variavel de ambiente (e mostre tambem a validacao de valor invalido):
 
-   Exemplo de par concorrente (o que explica para o professor):
-     [agencia-0] DEPOSITO ([1, 0, 0]) x [agencia-1] DEPOSITO ([0, 1, 0])
+    $env:BULLY_HEARTBEAT_MS="1000"
+    $env:BULLY_TIMEOUT_MS="abc"
+    $env:AGENCIA_ID="2"
+    .\.venv\Scripts\python.exe -m uvicorn src.main:app --port 4048
 
-   Por que sao concorrentes?
-   A Agencia 0 nao sabia nada da Agencia 1 (posicao 1 do seu vetor = 0).
-   A Agencia 1 nao sabia nada da Agencia 0 (posicao 0 do seu vetor = 0).
-   Sao depositos independentes, sem relacao de causa e efeito.
+  Aparece no console:
+    `[Bully] AVISO: BULLY_TIMEOUT_MS='abc' invalido (esperado inteiro > 0, em ms). Usando padrao 1000 ms.`
+    `[Bully] Configuracao: heartbeat=1000 ms, timeout=1000 ms`
 
-3. O par de TRANSFERENCIA nao aparece na lista de concorrentes:
-   [agencia-0] TRANSFERENCIA_DEBITO ([2, 0, 0]) -- nao esta na lista
-   [agencia-1] TRANSFERENCIA_CREDITO_REMOTO ([3, 2, 0]) -- nao esta na lista
+---
 
-   Por que NAO sao concorrentes?
-   [2,0,0] <= [3,2,0] em todas as posicoes (2<=3, 0<=2, 0<=0).
-   O DEBITO aconteceu ANTES do CREDITO -- existe relacao causal.
-   O script detectou isso corretamente.
+### Demo 7 -- Sincronizacao Offline-First e Conflito HTTP 409 no Backend (Sprint 3 - Parte E)
+
+No PowerShell, simule o app lendo o vetor, uma mudanca externa acontecendo na conta e o backend rejeitando a sincronizacao desatualizada com HTTP 409:
+
+    Invoke-RestMethod -Uri "http://localhost:4046/auth/bootstrap" -Method Post -ContentType "application/json" -Body '{"idConta":0,"senha":"1234"}'
+    $tok = (Invoke-RestMethod -Uri "http://localhost:4046/auth/login" -Method Post -ContentType "application/json" -Body '{"idConta":0,"senha":"1234"}').token
+    $h = @{ Authorization = "Bearer $tok" }
+
+    # 1. App consulta saldo e guarda o vetorAtual conhecido
+    $conta = Invoke-RestMethod -Uri "http://localhost:4046/contas/0" -Headers $h
+    $vAntigo = $conta.vetorAtual
+    Write-Host "Vetor guardado pelo app: $($vAntigo -join ', ')"
+
+    # 2. Mudanca acontece na agencia enquanto o app estava offline
+    Invoke-RestMethod -Uri "http://localhost:4046/contas/0/depositar" -Method Post -Headers $h -ContentType "application/json" -Body '{"valor":100}'
+
+    # 3. App tenta sincronizar operacao pendente usando o vetor antigo -> recebe HTTP 409!
+    Get-Date
+    $body = @{ tipo = "DEPOSITO"; valor = 10; vetorConhecido = $vAntigo } | ConvertTo-Json
+    try {
+      Invoke-RestMethod -Uri "http://localhost:4046/contas/0/sincronizar" -Method Post -Headers $h -ContentType "application/json" -Body $body
+    } catch {
+      Write-Host "HTTP $($_.Exception.Response.StatusCode.value__)"
+      $_.ErrorDetails.Message
+    }
 
   O que explica para o professor:
-  "O script compara os vetores de todos os pares de eventos entre agencias
-  diferentes. Se nenhum vetor domina o outro componente a componente,
-  os eventos sao CONCORRENTES: aconteceram sem se influenciar. Se um vetor
-  e menor ou igual ao outro em TODAS as posicoes, ha relacao causal.
-  Isso e impossivel de determinar com o Relogio de Lamport (numero unico)."
+  "A agencia compara `vetorConhecido` com `vetorAtual` usando `comparar_vetores()` dentro de um lock atomico (`with relogio.travar():`). Como o vetor avancou (relacao != IGUAIS), ela recusa aplicar as cegas e devolve HTTP 409 com `vetorConhecido`, `vetorAtual` e `contaAtual`."
 
 ---
 
-## A.5 -- Demonstracao via PowerShell (API diretamente)
+### Demo 8 -- App Flutter Mobile: Fluxo Bancario, Painel da Lider e Modo Offline-First (Sprint 3 - Partes D e F)
 
-    $base0 = "https://iceibank-agencia-0.onrender.com"
-    $base1 = "https://iceibank-agencia-1.onrender.com"
-    $tk0 = (Invoke-RestMethod -Method Post -Uri "$base0/auth/login" -ContentType "application/json" -Body '{"idConta":0,"senha":"demo123"}').token
-    Invoke-RestMethod -Method Post -Uri "$base0/contas/0/depositar" -ContentType "application/json" -Headers @{Authorization="Bearer $tk0"} -Body '{"valor":500}'
-    Write-Host "=== VETOR ANTES ==="
-    Invoke-RestMethod -Uri "$base0/status"
-    Invoke-RestMethod -Uri "$base1/status"
-    Invoke-RestMethod -Method Post -Uri "$base0/transferencias" -ContentType "application/json" -Headers @{Authorization="Bearer $tk0"} -Body '{"idOrigem":0,"idDestino":1,"valor":50}'
-    Start-Sleep -Seconds 3
-    Write-Host "=== VETOR DEPOIS ==="
-    Invoke-RestMethod -Uri "$base0/status"
-    Invoke-RestMethod -Uri "$base1/status"
-
----
-
-## A.6 -- O QUE E O RELOGIO VETORIAL (para entender e explicar)
-
-### O problema que ele resolve
-
-3 agencias em cidades diferentes, cada uma no seu computador.
-Cada maquina tem seu proprio relogio e podem estar dessincronizados.
-O relogio vetorial ordena eventos SEM depender do relogio fisico.
-
-### Como funciona
-
-Cada agencia mantem um PLACAR com 3 numeros (um por agencia):
-  Agencia 0: [0, 0, 0]
-  Agencia 1: [0, 0, 0]
-  Agencia 2: [0, 0, 0]
-
-REGRA 1 -- Evento local (depositar, sacar):
-  Soma +1 no proprio numero.
-  Agencia 0 deposita --> [1, 0, 0]
-  Agencia 0 saca     --> [2, 0, 0]
-
-REGRA 2 -- Enviar transferencia:
-  Soma +1 e manda o placar inteiro junto com a mensagem.
-  Agencia 0 envia --> placar [4, 0, 0] vai junto
-
-REGRA 3 -- Receber mensagem:
-  Fica com o MAIOR de cada posicao. Depois soma +1 no proprio.
-  Ag1 recebe [4, 0, 0] com placar [0, 0, 0]:
-  -> max(0,4)=4, max(0,0)=0, max(0,0)=0 --> [4, 0, 0]
-  -> +1 na posicao 1 --> [4, 1, 0]
-
-### O que o vetor nos diz
-
-V1 = [3, 1, 0] e V2 = [3, 2, 0]:
-  3<=3, 1<=2, 0<=0 -- V1 inteiramente <= V2
-  -> V1 aconteceu ANTES de V2
-
-V1 = [3, 0, 0] e V2 = [0, 2, 0]:
-  3<=0? NAO. Nao da para ordenar.
-  -> Sao CONCORRENTES (aconteceram sem se influenciar)
-
-### Por que e melhor que o Lamport (Sprint 1)?
-
-Lamport usava UM NUMERO. A=5 e B=7: sabia que 5<7, mas nao sabia se
-A causou B ou se foram eventos independentes em agencias diferentes.
-O Vetorial determina isso com certeza matematica.
+1. **Login e Fluxo Bancario:** entre no app no emulador Android com Conta `0` e Senha `1234`. Mostre o saldo, faca um deposito, um saque e uma transferencia.
+2. **Painel de Lideranca + Failover na Tela:** aponte para o painel no topo mostrando `Lider Atual: Agencia 2`. Derrube a Agencia 2 no terminal (`Ctrl+C`) sem tocar no celular: em ~3 a 6 segundos o painel atualiza sozinho na tela para `Lider Atual: Agencia 1`.
+3. **Modo Offline-First + UI Otimista:** ative o **Modo Aviao** no emulador. O banner offline aparece. Faca um deposito de R$ 50: ele nao falha — entra na lista `Operacoes feitas offline` como **Pendente**, e o saldo muda para **Saldo Provisorio** em dourado/laranja mostrando tambem o saldo confirmado abaixo.
+4. **Sincronizacao Automatica ao Reconectar:** desligue o Modo Aviao sem clicar em nada no app. Em poucos segundos a fila sincroniza sozinha, o item pendente some e o saldo confirmado passa a valer.
+5. **Conflito 409 Visivel na Tela do App:** ative o Modo Aviao, faca um deposito de R$ 20 no app e, antes de reconectar, faca um deposito direto na conta 0 pelo PowerShell (ou frontend web). Desative o Modo Aviao: o app recebe 409, atualiza o saldo para o valor real da agencia e exibe o card vermelho **CONFLITO** com os botoes **"Aplicar mesmo assim"** e **"Descartar"**.
 
 ---
 
@@ -222,61 +186,68 @@ O Vetorial determina isso com certeza matematica.
   Status Agencia 0:    https://iceibank-agencia-0.onrender.com/status
   Status Agencia 1:    https://iceibank-agencia-1.onrender.com/status
   Status Agencia 2:    https://iceibank-agencia-2.onrender.com/status
+  Lider Agencia 0:     https://iceibank-agencia-0.onrender.com/bully/lider
+  Lider Agencia 1:     https://iceibank-agencia-1.onrender.com/bully/lider
+  Lider Agencia 2:     https://iceibank-agencia-2.onrender.com/bully/lider
   API Docs Agencia 0:  https://iceibank-agencia-0.onrender.com/docs
   GitHub:              https://github.com/niicolasaps/iceibank
   CloudAMQP:           https://www.cloudamqp.com/
 
 ---
 
-# PARTE B -- RODAR LOCALMENTE E INSTALAR DO ZERO
+# PARTE B -- RODAR LOCALMENTE E INSTALAR DO ZERO (SPRINT 3 COMPLETO)
 
-> O conteudo abaixo e o guia original completo com todos os comandos
-> para rodar na sua maquina ou instalar do zero no laboratorio.
-
----
-
-﻿# ICEIBank - Guia de Execucao Completo (Sprint 2)
+> Guia completo com todos os comandos para rodar o Backend (3 agencias), Frontend Web e App Mobile Flutter na sua maquina ou instalar do zero.
 
 ---
 
 ## PARTE 1 - Rodar na sua maquina (ja configurada)
 
-### 1.1 - Subir o backend (3 agencias) - COM RabbitMQ
+### 1.1 - Subir o backend (3 agencias com RabbitMQ + Bully)
 
-Abra 3 terminais separados. Em CADA UM, defina RABBITMQ_URL antes de subir:
+Abra 3 terminais PowerShell separados. Em CADA UM, defina `RABBITMQ_URL` antes de subir:
 
 ```powershell
-# Terminal 1 - Agencia 0
+# Terminal 1 - Agencia 0 (porta 4046)
 cd C:\Users\Nicolas\Desktop\iceibank\agencia
-.venv\Scripts\Activate.ps1
+.\.venv\Scripts\Activate.ps1
 $env:RABBITMQ_URL="amqps://spwydfzs:XDNv5s6vOLAFD1ekPvSU8EBUoJiztP1W@jackal.rmq.cloudamqp.com/spwydfzs"
-$env:AGENCIA_ID="0"; python -m uvicorn src.main:app --port 4046 --reload
+$env:AGENCIA_ID="0"
+.\.venv\Scripts\python.exe -m uvicorn src.main:app --port 4046
 ```
 
 ```powershell
-# Terminal 2 - Agencia 1
+# Terminal 2 - Agencia 1 (porta 4047)
 cd C:\Users\Nicolas\Desktop\iceibank\agencia
-.venv\Scripts\Activate.ps1
+.\.venv\Scripts\Activate.ps1
 $env:RABBITMQ_URL="amqps://spwydfzs:XDNv5s6vOLAFD1ekPvSU8EBUoJiztP1W@jackal.rmq.cloudamqp.com/spwydfzs"
-$env:AGENCIA_ID="1"; python -m uvicorn src.main:app --port 4047 --reload
+$env:AGENCIA_ID="1"
+.\.venv\Scripts\python.exe -m uvicorn src.main:app --port 4047
 ```
 
 ```powershell
-# Terminal 3 - Agencia 2
+# Terminal 3 - Agencia 2 (porta 4048)
 cd C:\Users\Nicolas\Desktop\iceibank\agencia
-.venv\Scripts\Activate.ps1
+.\.venv\Scripts\Activate.ps1
 $env:RABBITMQ_URL="amqps://spwydfzs:XDNv5s6vOLAFD1ekPvSU8EBUoJiztP1W@jackal.rmq.cloudamqp.com/spwydfzs"
-$env:AGENCIA_ID="2"; python -m uvicorn src.main:app --port 4048 --reload
+$env:AGENCIA_ID="2"
+.\.venv\Scripts\python.exe -m uvicorn src.main:app --port 4048
 ```
 
-Quando as 3 subirem corretamente, voce vera em cada terminal:
-  [Agencia X] ouvindo na porta 404X
-  [Mensageria] Agencia X ouvindo fila: fila-agencia-X
+*(Opcional - Funcionalidade Adicional Sprint 3: defina `$env:BULLY_HEARTBEAT_MS="3000"` e `$env:BULLY_TIMEOUT_MS="1000"` antes do uvicorn se quiser customizar os tempos do Bully).*
 
-> IMPORTANTE: $env:RABBITMQ_URL precisa ser definida ANTES de subir cada agencia.
-> Se voce abrir um terminal novo, defina ela de novo antes de rodar o uvicorn.
+### 1.2 - Criar as contas iniciais (Bootstrap)
 
-### 1.2 - Subir o frontend (interface web)
+Como o armazenamento das agencias e em memoria RAM, crie as contas 0, 1 e 2 apos subir os servidores:
+
+```powershell
+# Terminal 4
+Invoke-RestMethod -Uri "http://localhost:4046/auth/bootstrap" -Method Post -ContentType "application/json" -Body '{"idConta":0,"senha":"1234"}'
+Invoke-RestMethod -Uri "http://localhost:4047/auth/bootstrap" -Method Post -ContentType "application/json" -Body '{"idConta":1,"senha":"1234"}'
+Invoke-RestMethod -Uri "http://localhost:4048/auth/bootstrap" -Method Post -ContentType "application/json" -Body '{"idConta":2,"senha":"1234"}'
+```
+
+### 1.3 - Subir o frontend web (React / Vite)
 
 ```powershell
 # Terminal 4
@@ -285,226 +256,112 @@ npm run dev
 # Abre em http://localhost:5173
 ```
 
+### 1.4 - Subir o App Mobile Flutter no Emulador Android
+
+```powershell
+# Terminal 5
+# 1. Garanta que o Flutter esta no PATH da sessao (caso nao esteja global):
+$env:Path += ";C:\flutter\flutter\bin"
+
+# 2. Inicie o emulador Android (ou abra pelo Android Studio -> Virtual Device Manager):
+flutter emulators --launch Pixel_9_Pro
+
+# 3. Aguarde o emulador ligar completamente e rode o app:
+cd C:\Users\Nicolas\Desktop\iceibank\app_mobile
+flutter run -d emulator-5554
+```
+
+> **Nota sobre rede no Android:** o arquivo `app_mobile/lib/config.dart` ja vem configurado com `http://10.0.2.2:4046` (4047 e 4048), que e o IP especial do emulador Android que aponta para o `localhost` do Windows. Se for rodar em **celular fisico via USB**, troque pelo IP Wi-Fi do seu PC em `config.dart` e suba o `uvicorn` com `--host 0.0.0.0`.
+
 ---
 
 ## PARTE 2 - Regra de particionamento de contas
 
-A agencia responsavel por uma conta e: id % 3
+A agencia responsavel por uma conta e: `id % 3`
 
-- id 0, 3, 6 ... -> Agencia 0 (porta 4046)
-- id 1, 4, 7 ... -> Agencia 1 (porta 4047)
-- id 2, 5, 8 ... -> Agencia 2 (porta 4048)
+- `id 0, 3, 6 ...` -> Agencia 0 (porta `4046`)
+- `id 1, 4, 7 ...` -> Agencia 1 (porta `4047`)
+- `id 2, 5, 8 ...` -> Agencia 2 (porta `4048`)
 
 ---
 
-## PARTE 3 - Criar contas e usar via terminal
-
-### 3.1 - Bootstrap (criar acesso) e Login
-
-```powershell
-# Criar acesso para conta 0 na agencia 0
-Invoke-RestMethod -Method Post -Uri "http://localhost:4046/auth/bootstrap" -ContentType "application/json" -Body '{"idConta":0,"senha":"minha123"}'
-
-# Fazer login e guardar o token
-$tk0 = (Invoke-RestMethod -Method Post -Uri "http://localhost:4046/auth/login" -ContentType "application/json" -Body '{"idConta":0,"senha":"minha123"}').token
-```
-
-### 3.2 - Depositar, sacar e consultar
-
-```powershell
-# Depositar R$ 500 na conta 0
-Invoke-RestMethod -Method Post -Uri "http://localhost:4046/contas/0/depositar" -ContentType "application/json" -Headers @{Authorization="Bearer $tk0"} -Body '{"valor":500}'
-
-# Sacar R$ 50
-Invoke-RestMethod -Method Post -Uri "http://localhost:4046/contas/0/sacar" -ContentType "application/json" -Headers @{Authorization="Bearer $tk0"} -Body '{"valor":50}'
-
-# Consultar saldo
-Invoke-RestMethod -Uri "http://localhost:4046/contas/0" -Headers @{Authorization="Bearer $tk0"}
-```
-
-### 3.3 - Transferencia entre agencias (assincrona via RabbitMQ)
-
-```powershell
-# Conta 0 (ag0) -> Conta 1 (ag1) - agora vai pela fila RabbitMQ
-Invoke-RestMethod -Method Post -Uri "http://localhost:4046/transferencias" -ContentType "application/json" -Headers @{Authorization="Bearer $tk0"} -Body '{"idOrigem":0,"idDestino":1,"valor":100}'
-
-# Resposta: "Transferencia publicada para a agencia de destino (entrega assincrona)."
-# Aguardar 1-2 segundos e verificar que conta 1 recebeu:
-$tk1 = (Invoke-RestMethod -Method Post -Uri "http://localhost:4047/auth/login" -ContentType "application/json" -Body '{"idConta":1,"senha":"minha123"}').token
-Invoke-RestMethod -Uri "http://localhost:4047/contas/1" -Headers @{Authorization="Bearer $tk1"}
-```
-
-### 3.4 - Ver o relogio vetorial
-
-```powershell
-# Status mostra o vetor atual de cada agencia
-Invoke-RestMethod -Uri "http://localhost:4046/status"
-Invoke-RestMethod -Uri "http://localhost:4047/status"
-Invoke-RestMethod -Uri "http://localhost:4048/status"
-```
-
-### 3.5 - Teste de resiliencia (agencia fora do ar)
-
-```powershell
-# 1. Com agencia 1 fora do ar (Ctrl+C no Terminal 2), tente transferir:
-Invoke-RestMethod -Method Post -Uri "http://localhost:4046/transferencias" -ContentType "application/json" -Headers @{Authorization="Bearer $tk0"} -Body '{"idOrigem":0,"idDestino":1,"valor":50}'
-# Resposta: HTTP 200 - "Transferencia publicada..." (mensagem fica na fila!)
-
-# 2. Suba a agencia 1 novamente - ela vai consumir a mensagem da fila automaticamente
-```
-
-### 3.6 - Testar alerta de saldo baixo (funcionalidade adicional)
-
-```powershell
-# Fazer saque que deixe o saldo abaixo de R$ 50
-Invoke-RestMethod -Method Post -Uri "http://localhost:4046/contas/0/sacar" -ContentType "application/json" -Headers @{Authorization="Bearer $tk0"} -Body '{"valor":460}'
-# No terminal da agencia 0 vai aparecer:
-# [Alerta] Saldo baixo na conta 0: R$ 40.00 (limite: R$ 50.00)
-# [Mensageria] Publicado em agencia.0.alerta-saldo-baixo: {...}
-```
-
-### 3.7 - Logs unificados
+## PARTE 3 - Scripts de Observabilidade (Sprints 2 e 3)
 
 ```powershell
 cd C:\Users\Nicolas\Desktop\iceibank\agencia
-python mesclar_logs.py
+
+# Linha do tempo causal e deteccao de eventos concorrentes via Relogio Vetorial (Sprint 2):
+.\.venv\Scripts\python.exe mesclar_logs.py
+
+# Historico de eventos de eleicao Bully e linha do tempo de lideres (Sprint 3):
+.\.venv\Scripts\python.exe historico_lideranca.py
 ```
 
 ---
 
-## PARTE 4 - Usar pelo frontend (http://localhost:5173)
+## PARTE 4 - Instalar e rodar do ZERO em maquina nova
 
-1. Selecione a agencia correta para a conta que quer acessar
-2. Digite o ID da conta e a senha
-3. Clique em Entrar
-4. Use as abas: Saldo / Depositar / Sacar / Transferir / Status
+### 4.1 - Pre-requisitos
 
-Conta 0 -> agencia http://localhost:4046
-Conta 1 -> agencia http://localhost:4047
-Conta 2 -> agencia http://localhost:4048
+1. **Git:** https://git-scm.com/download/win
+2. **Python 3.11 (64-bit):** https://www.python.org/downloads/release/python-3119/ (marque *"Add Python to PATH"*). Evite Python 3.13+ na criacao da venv para nao precisar compilar `pydantic-core`.
+3. **Node.js LTS:** https://nodejs.org/
+4. **Flutter SDK + Android Studio:**
+   - Extraia o Flutter SDK em `C:\flutter` e adicione `C:\flutter\bin` (ou `C:\flutter\flutter\bin`) ao `PATH` do usuario.
+   - No Android Studio: **SDK Manager -> SDK Tools** -> marque **Android SDK Command-line Tools (latest)** e **NDK (Side by side) 28.2.13676358**.
+   - Em **Virtual Device Manager**, crie um emulador Android (ex.: Pixel 9 Pro).
+   - Confira tudo com `flutter doctor`.
 
----
-
-## PARTE 5 - Instalar e rodar do ZERO em maquina nova (ex: laboratorio)
-
-### 5.1 - Instalar Git
-
-1. Acesse: https://git-scm.com/download/win
-2. Instale com opcoes padrao
-3. Verifique: `git --version`
-
-### 5.2 - Instalar Python 3.11
-
-> IMPORTANTE: instale a versao 3.11 ou 3.12. NAO instale Python 3.13 ou 3.14.
-> Versoes mais novas causam erro de compilacao do pydantic-core.
-
-1. Acesse: https://www.python.org/downloads/release/python-3119/
-2. Baixe "Windows installer (64-bit)"
-3. CRITICO: marque "Add Python to PATH" antes de instalar
-4. Verifique: `python --version`
-
-### 5.3 - Instalar Node.js
-
-1. Acesse: https://nodejs.org/ -> versao LTS
-2. Instale com opcoes padrao
-3. Verifique: `node --version`
-
-### 5.4 - Habilitar scripts no PowerShell
+### 4.2 - Clonar e instalar dependencias
 
 ```powershell
 Set-ExecutionPolicy -ExecutionPolicy RemoteSigned -Scope CurrentUser
-# Responda: S
-```
 
-### 5.5 - Clonar o repositorio
-
-```powershell
 cd C:\Users\SeuUsuario\Desktop
-git clone https://github.com/niicolasps/iceibank.git
+git clone https://github.com/niicolasaps/iceibank.git
 cd iceibank
-```
 
-### 5.6 - Configurar o ambiente Python
-
-```powershell
+# 1. Backend Python
 cd agencia
-python -m venv .venv
-.venv\Scripts\Activate.ps1
+py -3.11 -m venv .venv
+.\.venv\Scripts\Activate.ps1
 python -m pip install --upgrade pip
 pip install --prefer-binary -r requirements.txt
-```
 
-> Se aparecer erro "Failed building wheel for pydantic-core":
-> ```powershell
-> pip install --only-binary :all: pydantic pydantic-core
-> pip install fastapi "uvicorn[standard]" httpx PyJWT pika
-> ```
-
-### 5.7 - Subir as 3 agencias
-
-> SEMPRE use `python -m uvicorn` (nao so `uvicorn`) e sempre defina RABBITMQ_URL primeiro.
-
-```powershell
-# Terminal 1 - Agencia 0
-cd C:\Users\SeuUsuario\Desktop\iceibank\agencia
-.venv\Scripts\Activate.ps1
-$env:RABBITMQ_URL="amqps://spwydfzs:XDNv5s6vOLAFD1ekPvSU8EBUoJiztP1W@jackal.rmq.cloudamqp.com/spwydfzs"
-$env:AGENCIA_ID="0"; python -m uvicorn src.main:app --port 4046 --reload
-```
-
-```powershell
-# Terminal 2 - Agencia 1
-cd C:\Users\SeuUsuario\Desktop\iceibank\agencia
-.venv\Scripts\Activate.ps1
-$env:RABBITMQ_URL="amqps://spwydfzs:XDNv5s6vOLAFD1ekPvSU8EBUoJiztP1W@jackal.rmq.cloudamqp.com/spwydfzs"
-$env:AGENCIA_ID="1"; python -m uvicorn src.main:app --port 4047 --reload
-```
-
-```powershell
-# Terminal 3 - Agencia 2
-cd C:\Users\SeuUsuario\Desktop\iceibank\agencia
-.venv\Scripts\Activate.ps1
-$env:RABBITMQ_URL="amqps://spwydfzs:XDNv5s6vOLAFD1ekPvSU8EBUoJiztP1W@jackal.rmq.cloudamqp.com/spwydfzs"
-$env:AGENCIA_ID="2"; python -m uvicorn src.main:app --port 4048 --reload
-```
-
-### 5.8 - Subir o frontend
-
-```powershell
-cd C:\Users\SeuUsuario\Desktop\iceibank\frontend
+# 2. Frontend Web React
+cd ..\frontend
 npm install
-npm run dev
+
+# 3. App Mobile Flutter
+cd ..\app_mobile
+flutter pub get
 ```
 
 ---
 
-## ERROS COMUNS
+## ERROS COMUNS E SOLUCOES
 
 | Erro | Causa | Solucao |
 |---|---|---|
-| [ERRO] Defina a variavel RABBITMQ_URL | RABBITMQ_URL nao foi definida antes de subir | Defina $env:RABBITMQ_URL="amqps://..." ANTES do uvicorn |
-| Failed building wheel for pydantic-core | Python 3.13 ou 3.14 sem wheel | Instale Python 3.11, ou use pip install --prefer-binary |
-| uvicorn nao reconhecido | uvicorn nao esta no PATH | Use python -m uvicorn em vez de uvicorn |
-| Porta ja em uso | Servico ja rodando | taskkill /PID (netstat -ano \| findstr :4046).Trim().Split()[-1] /F |
-| Conta nao encontrada | Servidor reiniciou (estado perdido) | Recrie contas com bootstrap + login |
+| `No module named uvicorn` | Chamou o `python` global (3.13) em vez do Python da `.venv` | Use `.\.venv\Scripts\python.exe -m uvicorn ...` ou ative `.venv\Scripts\Activate.ps1` |
+| `[ERRO] Defina a variavel RABBITMQ_URL` | `RABBITMQ_URL` nao foi definida no terminal atual | Defina `$env:RABBITMQ_URL="amqps://..."` antes de subir o `uvicorn` |
+| `'idna' codec can't encode character` | `RABBITMQ_URL` ficou com placeholder `amqps://...` | Use a URL completa real da instancia CloudAMQP |
+| `'flutter' nao e reconhecido` | Pasta do SDK do Flutter fora do PATH | Adicione `C:\flutter\flutter\bin` ao PATH do usuario ou rode `$env:Path += ";C:\flutter\flutter\bin"` |
+| `Android sdkmanager did not install NDK 28.2.13676358` | NDK exigido pelos plugins nao instalado no Android SDK | Android Studio -> SDK Manager -> SDK Tools -> Show Package Details -> NDK 28.2.13676358 |
+| `Conta nao encontrada nesta agencia` | As agencias reiniciaram (dados em memoria RAM) ou conta de outra particao | Rode o `/auth/bootstrap` na agencia correta (`id % 3`) |
 
 ---
 
-## RESUMO RAPIDO - comandos do dia a dia
+## RESUMO RAPIDO - Comandos do dia a dia
 
 | O que fazer | Comando |
 |---|---|
 | Definir RabbitMQ | `$env:RABBITMQ_URL="amqps://spwydfzs:XDNv5s6vOLAFD1ekPvSU8EBUoJiztP1W@jackal.rmq.cloudamqp.com/spwydfzs"` |
-| Subir agencia 0 | `$env:AGENCIA_ID="0"; python -m uvicorn src.main:app --port 4046 --reload` |
-| Subir agencia 1 | `$env:AGENCIA_ID="1"; python -m uvicorn src.main:app --port 4047 --reload` |
-| Subir agencia 2 | `$env:AGENCIA_ID="2"; python -m uvicorn src.main:app --port 4048 --reload` |
-| Subir frontend | `cd frontend; npm run dev` |
-| Ver logs | `cd agencia; python mesclar_logs.py` |
-| API docs | http://localhost:4046/docs |
-| Interface web local | http://localhost:5173 |
-| Interface web deploy | https://iceibank.vercel.app (ou URL do Vercel) |
-
-## IMPORTANTE - dados somem ao reiniciar
-
-As contas ficam apenas na memoria RAM. Se fechar o uvicorn, todas as contas somem.
-Isso e intencional nos Sprints 1 e 2. Persistencia em banco de dados e assunto do Sprint 4.
+| Subir agencia 0 | `$env:AGENCIA_ID="0"; .\.venv\Scripts\python.exe -m uvicorn src.main:app --port 4046` |
+| Subir agencia 1 | `$env:AGENCIA_ID="1"; .\.venv\Scripts\python.exe -m uvicorn src.main:app --port 4047` |
+| Subir agencia 2 | `$env:AGENCIA_ID="2"; .\.venv\Scripts\python.exe -m uvicorn src.main:app --port 4048` |
+| Consultar lider Bully | `Invoke-RestMethod -Uri "http://localhost:4046/bully/lider"` |
+| Historico de lideres | `cd agencia; .\.venv\Scripts\python.exe historico_lideranca.py` |
+| Linha do tempo causal | `cd agencia; .\.venv\Scripts\python.exe mesclar_logs.py` |
+| Subir frontend web | `cd frontend; npm run dev` |
+| Rodar app Flutter | `cd app_mobile; flutter run -d emulator-5554` |

@@ -1,4 +1,4 @@
-﻿# RESPOSTAS.md — ICEIBank Sprint 1
+# RESPOSTAS.md — ICEIBank Sprint 1
 
 ## Parte B — Seção 6.4: Perguntas sobre o Relógio de Lamport
 
@@ -312,6 +312,22 @@ CloudAMQP Manager confirma que a mensagem chega na exchange com a routing key co
 
 ## Secao 5.5 - Perguntas sobre Eleicao e Coordenador (Algoritmo de Bully)
 
+### Pergunta 1
+**Por que o algoritmo de Bully sempre elege o processo de maior ID, e nao o de menor? O resultado seria diferente (mas ainda assim correto) se a regra fosse invertida?**
+
+A escolha do "maior ID" e uma convencao arbitraria: o que o algoritmo de Bully exige e uma
+ordem total deterministica e estrita entre os identificadores dos processos (0 < 1 < 2),
+de modo que qualquer subconjunto nao vazio de agencias ativas tenha um unico elemento vencedor
+sem ambiguidade. O nome "Bully" ("valentao") vem exatamente da metafora de que o processo de
+maior numero "intimida" os menores e assume a lideranca.
+
+Se a regra fosse invertida (eleger sempre o MENOR ID ativo, enviando mensagens de eleicao
+apenas para agencias com ID menor que o seu), o algoritmo continuaria 100% correto: todas as
+propriedades de seguranca (unicidade da lider apos convergencia) e vivacidade (eventual eleicao
+de uma lider ativa) seriam preservadas. O resultado prático seria diferente apenas em QUEM
+vence (com todas as 3 ativas, a Agencia 0 seria a lider em vez da Agencia 2), mas o consenso
+funcionaria da mesma forma.
+
 ### Pergunta 2
 **Mais de uma agencia declarou TORNOU_LIDER durante a subida. Isso e um bug ou comportamento esperado?**
 
@@ -346,6 +362,25 @@ ativo; o que nao e garantido e a ausencia de liderancas transitorias durante a s
 Em resumo: lideres transitorios sao um efeito colateral previsivel de agencias subindo em momentos
 diferentes. Bug seria o estado final divergente (agencias discordando da lider), o que nao ocorreu
 (as tres responderam liderAtual = 2 em /bully/lider).
+
+### Pergunta 3
+**O endpoint /bully/eleicao nao tem nenhuma autenticacao. Isso e um problema de seguranca real para este projeto? Por que, ou por que nao?**
+
+Em um ambiente de producao real exposto na internet, SIM, seria uma vulnerabilidade grave:
+  1. Negacao de servico (DoS) por tempestade de eleicoes: qualquer agente externo que descubra
+     a URL pode enviar POST /bully/eleicao repetidamente, forcando a agencia a disparar eleicoes,
+     incrementar o relogio vetorial sem parar (o que tambem causa falsos conflitos 409 no
+     endpoint /sincronizar) e saturar a rede entre agencias.
+  2. Falsificacao de coordenador (spoofing): como /bully/coordenador tambem nao tem autenticacao,
+     um atacante poderia enviar {"liderId": 99, "vetorEnvio": [999,999,999]}, corrompendo tanto
+     o ponteiro de lider quanto o relogio vetorial de todas as agencias.
+
+No escopo academico deste Sprint 3, porem, o impacto e limitado por dois motivos:
+  - As agencias rodam em rede local controlada (localhost) para fins didaticos.
+  - A lider eleita neste sprint e puramente informativa (nenhuma transacao bancaria depende dela
+    ainda; isso so muda no Sprint 4 com 2PC). Mesmo assim, em producao esses endpoints internos
+    deveriam exigir o `token_servico` (JWT maquina-a-maquina que ja criamos no Sprint 1) ou
+    mTLS/rede privada entre os nos do cluster.
 
 ---
 ## Secao 6.4 - Perguntas sobre Heartbeat e Failover
@@ -412,6 +447,232 @@ excecao de timeout. Consequencias:
 
 Mitigacoes: timeout maior ou adaptativo, exigir varias falhas consecutivas antes de declarar a
 lider morta, e (em sistemas reais) usar eleicao com "terms/epochs" para descartar lideres antigos.
+
+---
+## Secao 7.3 - Perguntas sobre Observabilidade da Eleicao (Historico de Lideranca)
+
+### Pergunta 1
+**Observando a saida do script, quantas vezes a lideranca mudou de maos durante a "tempestade" de eleicoes da subida inicial (Parte A), antes de estabilizar? Isso tem algum custo real para o sistema (rede, tempo), mesmo nao afetando o resultado final?**
+
+Na saida do meu `historico_lideranca.py`, durante a subida inicial houve **3 declaracoes de
+TORNOU_LIDER** (ou seja, **2 trocas de maos** antes de estabilizar na Agencia 2):
+
+  A partir de 2026-10-22T05:09:15.475593+00:00: Agencia 0 e a lider
+  A partir de 2026-10-22T05:09:20.824735+00:00: Agencia 1 e a lider
+  A partir de 2026-10-22T05:09:26.022990+00:00: Agencia 2 e a lider
+
+Mesmo convergindo para o resultado correto (Agencia 2), essa "tempestade" inicial tem custos reais:
+  1. **Custo de tempo (latencia de convergencia):** a Agencia 0 precisou esperar 2 timeouts de
+     1 segundo cada (tentando falar com 1 e 2) antes de se declarar lider; a Agencia 1 esperou
+     1 timeout (tentando falar com a 2). Somando as subidas escalonadas, o cluster levou ~15s
+     (de 05:09:11 a 05:09:26) ate estabilizar.
+  2. **Custo de rede (mensagens O(N^2)):** no pior caso (processos subindo do menor para o maior
+     ou iniciando eleicao juntos), o Bully troca O(N^2) mensagens HTTP de `/bully/eleicao` e
+     `/bully/coordenador`. Com 3 agencias sao poucas chamadas, mas com dezenas de nos o trafego
+     de subida cresce quadraticamente.
+  3. **Inflacao do relogio vetorial:** cada `ELEICAO_INICIADA`, `ao_enviar()`, `ao_receber()` e
+     `TORNOU_LIDER` avanca o vetor da agencia. Na subida, o vetor ja comeca em valores como
+     `[8, 4, 3]` antes de qualquer operacao bancaria acontecer — e qualquer avanco do vetor por
+     eventos de eleicao invalida o `vetorConhecido` de clientes mobile offline (gerando HTTP 409).
+
+---
+## Secao 8.3 - Perguntas sobre o App Flutter e Painel de Lideranca
+
+### Pergunta 1
+**Como o app decide com que frequencia consultar /bully/lider? Que trade-off voce considerou ao escolher esse intervalo (resposta rapida a mudancas vs. consumo de bateria/rede do celular)?**
+
+O app consulta `GET /bully/lider` a cada **3 segundos** (`Config.intervaloPolling = Duration(seconds: 3)`
+em `app_mobile/lib/config.dart`), disparado por um `Timer.periodic` dentro do `LiderProvider`,
+com timeout curto de 2 segundos por tentativa.
+
+Escolhi 3 segundos porque e exatamente o mesmo intervalo padrao do heartbeat do backend
+(`INTERVALO_HEARTBEAT_S = 3.0`). Consultar muito mais rapido do que o proprio cluster demora
+para detectar uma queda (ex.: a cada 200ms) nao traria informacao nova mais cedo, mas manteria
+o radio celular ativo continuamente, drenando bateria e dados moveis. Consultar muito devagar
+(ex.: a cada 30s) economizaria bateria, mas deixaria a tela mostrando uma lider morta por muito
+tempo e prejudicaria a demonstracao de failover em tempo real. Alem disso, para poupar bateria,
+o `LiderProvider` implementa `WidgetsBindingObserver` e **pausa o Timer automaticamente** quando
+o app vai para segundo plano (`AppLifecycleState.paused`), retomando ao voltar (`resumed`).
+
+### Pergunta 2
+**Se, num momento de transicao, voce consultasse duas agencias diferentes e elas respondessem lideres diferentes (uma ainda nao sabe da nova eleicao), como seu app se comporta? Isso e um problema real, ou se resolve sozinho na proxima consulta?**
+
+No `LiderProvider`, o app memoriza em `_ultimaAgenciaOk` o indice da ultima agencia que respondeu
+e sempre comeca a proxima rodada de polling por ela, so fazendo fallback para a proxima (`(indice + 1) % 3`)
+quando a atual falha por timeout/conexao recusada. Se a agencia que ele consultava cair (por
+exemplo, a propria lider Agencia 2 foi derrubada), o app passa a consultar a Agencia 0 ou 1.
+Nesse exato instante de transicao, pode acontecer de:
+  - A agencia consultada responder `{"liderAtual": null}` (ja detectou a queda, mas a eleicao
+    ainda nao terminou) -> o app exibe o estado amarelo **"Eleicao em andamento..."**; ou
+  - Uma agencia ainda responder a lider antiga (2) por 1 ou 2 segundos antes do seu heartbeat
+    estourar, e na consulta seguinte (3s depois) ja responder a nova lider (1).
+
+Para o escopo do Sprint 3, **isso se resolve sozinho na proxima consulta** (consistencia eventual
+da visualizacao, convergindo em ~3 a 6 segundos) e nao causa dano porque a lider e apenas
+informativa na UI. Em um sistema real onde o cliente enviasse escritas exclusivas para a lider
+(Sprint 4), falar com uma lider obsoleta por alguns segundos poderia causar requisicoes
+rejeitadas ou *split-brain*, exigindo numeros de epoca (*term/epoch*) para validar a lideranca.
+
+### Pergunta 3
+**Compare a arquitetura do app Flutter com a do frontend web do Sprint 1: o que foi reaproveitavel (conceitos, nao necessariamente codigo) e o que precisou ser pensado de forma diferente por ser uma plataforma mobile?**
+
+**O que foi 100% reaproveitavel:**
+  - **Contrato da API REST e regra de particionamento:** mesmos endpoints (`/auth/login`, `/contas/{id}`,
+    `/depositar`, `/sacar`, `/transferencias`), mesmo formato de token Bearer JWT e mesma regra
+    `id_conta % 3` para escolher em qual agencia bater.
+  - **Separacao em camadas (MVC/Provider):** `ApiClient` equivale ao `services/api.js` (Model de
+    rede), `AuthProvider`/`ContaProvider`/`LiderProvider` equivalem ao hook `useAuth.js` e estado
+    do `App.jsx` (Controller), e os widgets em `screens/` equivalem aos componentes React (View).
+
+**O que precisou ser pensado de forma diferente no mobile:**
+  1. **Enderecamento de rede:** no navegador web, `localhost:4046` aponta para a propria maquina.
+     No emulador Android, `localhost` e o proprio aparelho virtual; para alcancar o PC host foi
+     preciso usar o IP especial de loopback do emulador (`10.0.2.2:4046`) e liberar trafego HTTP
+     em texto claro (`usesCleartextTraffic="true"` e permissoes `INTERNET`/`ACCESS_NETWORK_STATE`
+     no `AndroidManifest.xml`).
+  2. **Persistencia segura e local:** em vez de `localStorage` do navegador (sincrono e volatil),
+     o token JWT vai para o `FlutterSecureStorage` (Keystore do Android, assincrono) e os dados
+     da conta + fila de operacoes vao para um banco relacional embarcado (`sqflite`).
+  3. **Ciclo de vida e conectividade instavel:** celulares mudam entre online/offline (modo
+     aviao, queda de sinal) e vao para segundo plano. Foi necessario ouvir eventos do SO
+     (`WidgetsBindingObserver` para pausar timers e `connectivity_plus` para detectar reconexao)
+     e desenhar toda a experiencia *offline-first* com fila persistida e UI otimista.
+
+---
+## Secao 9.6 - Perguntas sobre Sincronizacao Offline-First no Backend
+
+### Pergunta 1
+**Por que a agencia compara o vetor inteiro, e nao so verifica se o saldo da conta mudou? O que a comparacao de vetores detecta que uma simples comparacao de saldo nao detectaria?**
+
+Comparar apenas o saldo sofre do **problema ABA**: o estado da conta pode ter mudado mais de
+uma vez e voltado exatamente ao mesmo valor numerico. Exemplo: o app leu `saldo = R$ 100,00`
+com `vetor = [2, 0, 0]` e ficou offline. Enquanto estava desconectado, a conta recebeu um
+deposito de R$ 50 (saldo foi a R$ 150) e depois sofreu um saque ou transferencia de R$ 50
+(saldo voltou a R$ 100, mas `vetor` agora e `[4, 0, 0]`).
+
+Se a agencia olhasse apenas `saldoConhecido == saldoAtual` (100 == 100), acharia que nada
+aconteceu e aplicaria um saque offline cegamente, ignorando que duas movimentacoes reais
+ocorreram no meio do caminho. O relogio vetorial e **monotonicamente crescente**: cada evento
+incrementa a posicao da agencia, entao `[2, 0, 0] != [4, 0, 0]` detecta com certeza matematica
+que houve eventos intermediarios, mesmo quando o saldo final coincide. Alem disso, o vetor
+captura relacoes causais entre agencias (ex.: creditos remotos vindos pelo RabbitMQ).
+
+### Pergunta 2
+**Neste exemplo, qualquer mudanca no vetor da agencia (mesmo em uma operacao de outra conta, que nada tem a ver com a sua) e tratada como conflito. Explique por que ela existe e o que seria necessario para tornar a deteccao mais precisa, por conta.**
+
+Essa simplificacao existe porque, desde o Sprint 2, a agencia mantem **um unico `RelogioVetorial`
+global por instancia de agencia** (`app.state.relogio`), e nao um relogio por conta. Assim,
+qualquer evento naquela agencia — um deposito na conta 3, uma mensagem da conta 6, ou ate um
+evento interno do algoritmo de Bully (`ELEICAO_INICIADA`, `LIDER_ANUNCIADO`, `LIDER_NAO_RESPONDEU`)
+— incrementa `self.vetor[id_agencia]`. Quando o app da conta 0 tenta sincronizar, o vetor global
+da Agencia 0 avancou e `comparar_vetores` devolve `'ANTES'` em vez de `'IGUAIS'`, gerando um
+**falso positivo de conflito (HTTP 409)** mesmo que a conta 0 nao tenha sido tocada.
+
+Para tornar a deteccao precisa **por conta**, seria necessario:
+  1. Manter um **vetor (ou contador de versao/`etag`) individual dentro de cada conta**, ex.:
+     `conta["vetorConta"] = [0, 0, 0]` (ou um inteiro `conta["versao"]`), que so e incrementado
+     quando um evento afeta especificamente aquela conta (`criar_conta`, `depositar`, `sacar`,
+     `transferir` envolvendo aquela conta, `processar_credito` daquela conta).
+  2. Separar os eventos de infraestrutura (Bully/heartbeat) do relogio de dados das contas, para
+     que eleicoes de lider nao invalidem a sincronizacao de clientes mobile.
+  3. Em `GET /contas/{id}` e `POST /contas/{id}/sincronizar`, enviar e comparar o vetor da
+     conta especifica em vez do vetor global da agencia.
+
+### Pergunta 3
+**Quando a sincronizacao e recusada (409), a agencia devolve o estado atual da conta. O que o app deveria fazer com essa informacao - descartar a operacao pendente, tentar de novo automaticamente, ou perguntar a pessoa usuaria? Justifique sua escolha de design na Parte F.**
+
+Escolhi **nao descartar em silencio nem reaplicar as cegas, e sim pausar a fila e perguntar a
+pessoa usuaria**, mostrando o estado real da conta (`contaAtual.saldo`) e oferecendo dois botoes
+explicitos: **"Aplicar mesmo assim"** e **"Descartar"**.
+
+Justificativa das tres alternativas em um dominio bancario:
+  - **Descartar automaticamente e ruim:** a pessoa usuaria fez a operacao achando que ela seria
+    enviada; sumir com um deposito ou saque sem dar opcao de reaplicar causa perda de intencao do
+    usuario.
+  - **Tentar de novo automaticamente (sem perguntar) e perigoso em banco:** imagine que a pessoa
+    viu saldo de R$ 100 offline e pediu um saque de R$ 80, mas enquanto estava offline ja caiu
+    um debito automatico de R$ 50 (saldo real = R$ 50, ou R$ 90). Ou imagine que ela fez o
+    deposito pelo frontend web porque achou que o app nao tinha funcionado: reaplicar sozinho
+    duplicaria a operacao.
+  - **Perguntar ao usuario mostrando o saldo real (escolha adotada):** atualiza imediatamente o
+    `saldoConfirmado` na tela com o `contaAtual` devolvido no 409, marca o item na lista como
+    `CONFLITO` em vermelho e bloqueia o restante da fila (para preservar a ordem causal das
+    operacoes). Se a pessoa confirmar **"Aplicar mesmo assim"**, o app faz `GET /contas/{id}`
+    para pegar o `vetorAtual` mais recente e reenvia a operacao com seguranca; se clicar em
+    **"Descartar"**, remove a operacao e libera o restante da fila.
+
+---
+## Secao 10.3 - Perguntas sobre o App Flutter Offline-First
+
+### Pergunta 1
+**Qual biblioteca de armazenamento local voce escolheu, e por que? Quais alternativas voce considerou?**
+
+Escolhi o **`sqflite`** (SQLite embarcado para Flutter, em `app_mobile/lib/services/banco_local.dart`),
+com duas tabelas relacionais: `contas` (cache do ultimo `saldo`, `nomeAluno`, `vetor` em JSON e
+timestamp `atualizadoEm`) e `pendentes` (fila FIFO com `id AUTOINCREMENT`, `idConta`, `tipo`,
+`valor`, `vetorConhecido`, `status`, `mensagem` e `saldoReal`).
+
+Alternativas consideradas:
+  - **`SharedPreferences`:** descartado para a fila porque e apenas chave-valor simples, sem
+    consultas filtradas por `idConta` nem garantia transacional ao atualizar itens individuais.
+    (Para o token JWT usei `flutter_secure_storage`, que usa criptografia do Android Keystore).
+  - **`Hive`:** banco NoSQL leve e rapido em Dart puro; seria suficiente, mas exige adaptadores
+    ou caixas separadas e nao oferece SQL padrao (`WHERE idConta = ? ORDER BY id ASC`) tao direto
+    para manipular uma fila ordenada com estados (`PENDENTE`, `CONFLITO`, `RECUSADA`).
+  - **`Drift`:** ORM reativo sobre SQLite, muito poderoso, porem exige geracao de codigo
+    (`build_runner`), adicionando complexidade desnecessaria para duas tabelas simples.
+
+O `sqflite` foi o ponto ideal: nativo no Android, transacional (ACID), preserva a ordem exata da
+fila via `ORDER BY id ASC` e nao exige `build_runner`.
+
+### Pergunta 2
+**Na tarefa 5, o que exatamente aconteceu na tela do app quando a sincronizacao foi recusada? Descreva o comportamento que voce implementou e explique por que escolheu essa abordagem em vez de outra.**
+
+Quando fiz o deposito offline no app, alterei o saldo da mesma conta por fora e reconectei:
+  1. O `ContaProvider` detectou a reconexao e chamou `POST /contas/0/sincronizar` enviando o
+     `vetorConhecido` antigo que estava salvo na operacao pendente.
+  2. O backend respondeu **HTTP 409** com `erro`, `vetorConhecido`, `vetorAtual` e `contaAtual`.
+  3. Na tela do app, imediatamente:
+     - O saldo principal deixou de somar aquela operacao no saldo provisorio e passou a exibir o
+       **saldo real atual da agencia** (`contaAtual.saldo`), atualizado no cache do SQLite.
+     - Apareceu um alerta vermelho no topo explicando que a operacao feita offline nao foi
+       aplicada automaticamente porque a conta mudou na agencia enquanto o app estava desconectado.
+     - Na secao **"Operacoes feitas offline"**, o item mudou de `Pendente` (laranja) para um
+       cartao vermelho destacado **`CONFLITO: Deposito de R$ ...`**, exibindo a mensagem do
+       servidor, o texto *"Saldo real atual na agencia: R$ ..."* e dois botoes:
+       **`Aplicar mesmo assim`** e **`Descartar`**.
+  4. Ao clicar em **`Aplicar mesmo assim`**, o app consultou `GET /contas/0` para obter o
+     `vetorAtual` vigente, atualizou o `vetorConhecido` da pendente e reenviou ao `/sincronizar`,
+     que respondeu HTTP 200 e aplicou o valor sobre o saldo novo.
+
+Escolhi essa abordagem porque torna o conflito 100% transparente na demonstracao (atendendo ao
+requisito da secao 10.1 de nao esconder o 409 e mostrar o estado real da conta) e da controle
+total ao usuario sobre reenviar ou cancelar.
+
+### Pergunta 3
+**UI otimista significa mostrar o resultado esperado antes de ter certeza de que ele vai acontecer. Que risco isso traz para um aplicativo bancario, especificamente? Como seu design tenta reduzir esse risco?**
+
+Em um aplicativo bancario, o risco principal da UI otimista e **induzir a pessoa usuaria a tomar
+decisoes financeiras com base em um dinheiro ou operacao que ainda nao foi (e pode nunca ser)
+confirmado pelo banco**. Por exemplo:
+  - Achar que um deposito offline ja "caiu" de verdade e contar com aquele saldo para outra coisa;
+  - Achar que um saque/pagamento foi concluido quando, ao reconectar, ele sera rejeitado por
+    conflito (409) ou por falta de saldo real (400), ja que outra operacao consumiu o saldo na
+    agencia enquanto o celular estava sem rede.
+
+Como o design do app reduz esse risco:
+  1. **Separacao visual clara entre "Saldo Provisorio" e "Saldo Confirmado":** quando ha itens na
+     fila, o valor principal muda de cor (amarelo/laranja), exibe um selo explicito
+     *"Saldo provisorio: N operacao(oes) pendente(s) de sincronizacao"* e mostra logo abaixo,
+     separadamente, o *"Saldo confirmado pela agencia: R$ ..."*.
+  2. **Banner de modo offline e lista detalhada da fila:** um banner avisa que o app esta sem
+     conexao com a agencia e cada operacao nao confirmada fica listada com horario e status.
+  3. **Validacao local conservadora:** o app bloqueia saques offline maiores que o `saldoProvisorio`
+     e **proibe transferencias entre contas quando esta offline ou enquanto houver operacoes
+     pendentes**, evitando que efeitos nao confirmados se propaguem para outras contas/agencias.
+  4. **Reversao imediata em caso de 409 ou 400:** se a agencia recusar a sincronizacao, o efeito
+     otimista daquela operacao e retirado na hora do `saldoProvisorio` e o saldo real da agencia
+     assume a tela.
 
 ---
 ## Funcionalidade Adicional Sprint 3 - Timeout Configuravel

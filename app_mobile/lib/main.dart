@@ -1,12 +1,21 @@
 import 'package:flutter/material.dart';
+import 'package:flutter/services.dart';
 import 'package:provider/provider.dart';
 
 import 'providers/auth_provider.dart';
 import 'screens/home_screen.dart';
 import 'screens/login_screen.dart';
 import 'services/api_client.dart';
+import 'theme.dart';
 
 void main() {
+  WidgetsFlutterBinding.ensureInitialized();
+  SystemChrome.setSystemUIOverlayStyle(const SystemUiOverlayStyle(
+    statusBarColor: Colors.transparent,
+    statusBarIconBrightness: Brightness.light,
+    systemNavigationBarColor: IceiTheme.bgDeep,
+    systemNavigationBarIconBrightness: Brightness.light,
+  ));
   runApp(const IceiBankApp());
 }
 
@@ -24,7 +33,8 @@ class IceiBankApp extends StatelessWidget {
       ],
       child: MaterialApp(
         title: 'ICEIBank',
-        theme: ThemeData(colorSchemeSeed: Colors.indigo, useMaterial3: true),
+        debugShowCheckedModeBanner: false,
+        theme: IceiTheme.buildTheme(),
         home: const _Raiz(),
       ),
     );
@@ -39,7 +49,12 @@ class _Raiz extends StatelessWidget {
   Widget build(BuildContext context) {
     final auth = context.watch<AuthProvider>();
     if (auth.carregando) {
-      return const Scaffold(body: Center(child: CircularProgressIndicator()));
+      return const Scaffold(
+        backgroundColor: IceiTheme.bgDeep,
+        body: Center(
+          child: CircularProgressIndicator(color: IceiTheme.gold),
+        ),
+      );
     }
     return auth.estaLogado ? const HomeScreen() : const LoginScreen();
   }

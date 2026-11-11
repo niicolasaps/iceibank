@@ -30,6 +30,10 @@ class ApiClient {
 
   String? token;
 
+  /// Quando definido na tela de login, envia login/operacoes para a agencia escolhida no dropdown
+  /// (igual ao seletor da interface web). Se null, usa a particao automatica `idConta % 3`.
+  int? agenciaSelecionada;
+
   /// Chamado quando uma rota protegida devolve 401 (token ausente/expirado).
   void Function()? onNaoAutorizado;
 
@@ -94,7 +98,10 @@ class ApiClient {
     return 'Erro $status ao falar com a agencia.';
   }
 
-  String _baseDaConta(int idConta) => Config.agencias[Config.agenciaDaConta(idConta)];
+  String _baseDaConta(int idConta) {
+    final idx = agenciaSelecionada ?? Config.agenciaDaConta(idConta);
+    return Config.agencias[idx];
+  }
 
   // --- Autenticacao (contrato do Sprint 1: POST /auth/login {idConta, senha}) ---
 
