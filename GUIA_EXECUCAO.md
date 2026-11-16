@@ -260,13 +260,15 @@ npm run dev
 
 ```powershell
 # Terminal 5
-# 1. Garanta que o Flutter esta no PATH da sessao (caso nao esteja global):
+# 1. So se o comando 'flutter' der erro de "nao reconhecido" (ex.: PC do laboratorio),
+#    cole a linha abaixo para ensinar ao PowerShell onde o Flutter foi instalado:
 $env:Path += ";C:\flutter\flutter\bin"
 
-# 2. Inicie o emulador Android (ou abra pelo Android Studio -> Virtual Device Manager):
+# 2. Veja os emuladores disponiveis e inicie o emulador Android:
+flutter emulators
 flutter emulators --launch Pixel_9_Pro
 
-# 3. Aguarde o emulador ligar completamente e rode o app:
+# 3. Aguarde o celular virtual ligar completamente e rode o app:
 cd C:\Users\Nicolas\Desktop\iceibank\app_mobile
 flutter run -d emulator-5554
 ```
@@ -285,7 +287,92 @@ A agencia responsavel por uma conta e: `id % 3`
 
 ---
 
-## PARTE 3 - Scripts de Observabilidade (Sprints 2 e 3)
+## PARTE 3 - Criar contas e operar via Terminal (Depositar, Sacar, Transferir, Consultar)
+
+### 3.1 - Bootstrap (criar acesso) e Login (guardar o token JWT)
+
+```powershell
+# Criar acesso para as contas 0, 1 e 2 (uma em cada agencia)
+Invoke-RestMethod -Method Post -Uri "http://localhost:4046/auth/bootstrap" -ContentType "application/json" -Body '{"idConta":0,"senha":"1234"}'
+Invoke-RestMethod -Method Post -Uri "http://localhost:4047/auth/bootstrap" -ContentType "application/json" -Body '{"idConta":1,"senha":"1234"}'
+Invoke-RestMethod -Method Post -Uri "http://localhost:4048/auth/bootstrap" -ContentType "application/json" -Body '{"idConta":2,"senha":"1234"}'
+
+# Fazer login na Conta 0 (Agencia 0) e guardar o token na variavel $tk0
+$tk0 = (Invoke-RestMethod -Method Post -Uri "http://localhost:4046/auth/login" -ContentType "application/json" -Body '{"idConta":0,"senha":"1234"}').token
+
+# Fazer login na Conta 1 (Agencia 1) e guardar o token na variavel $tk1
+$tk1 = (Invoke-RestMethod -Method Post -Uri "http://localhost:4047/auth/login" -ContentType "application/json" -Body '{"idConta":1,"senha":"1234"}').token
+
+# Fazer login na Conta 2 (Agencia 2) e guardar o token na variavel $tk2
+$tk2 = (Invoke-RestMethod -Method Post -Uri "http://localhost:4048/auth/login" -ContentType "application/json" -Body '{"idConta":2,"senha":"1234"}').token
+```
+
+### 3.2 - Depositar, Sacar e Consultar Saldo (com vetorAtual)
+
+```powershell
+# Depositar R$ 500 na Conta 0 (Agencia 0)
+Invoke-RestMethod -Method Post -Uri "http://localhost:4046/contas/0/depositar" -ContentType "application/json" -Headers @{Authorization="Bearer $tk0"} -Body '{"valor":500}'
+
+# Sacar R$ 50 da Conta 0 (Agencia 0)
+Invoke-RestMethod -Method Post -Uri "http://localhost:4046/contas/0/sacar" -ContentType "application/json" -Headers @{Authorization="Bearer $tk0"} -Body '{"valor":50}'
+
+# Consultar saldo e vetorAtual da Conta 0
+Invoke-RestMethod -Uri "http://localhost:4046/contas/0" -Headers @{Authorization="Bearer $tk0"}
+```
+
+### 3.3 - Transferencia local (mesma agencia) e entre agencias (via RabbitMQ)
+
+```powershell
+# Transferencia ENTRE agencias: Conta 0 (Agencia 0) -> Conta 1 (Agencia 1) via fila RabbitMQ
+Invoke-RestMethod -Method Post -Uri "http://localhost:4046/transferencias" -ContentType "application/json" -Headers @{Authorization="Bearer $tk0"} -Body '{"idOrigem":0,"idDestino":1,"valor":100}'
+
+# Aguardar 1-2 segundos e conferir que o saldo caiu na Conta 1 (Agencia 1):
+Invoke-RestMethod -Uri "http://localhost:4047/contas/1" -Headers @{Authorization="Bearer $tk1"}
+
+# Transferencia LOCAL (mesma agencia): crie a Conta 3 na Agencia 0 (3 % 3 = 0) e transfira 0 -> 3
+Invoke-RestMethod -Method Post -Uri "http://localhost:4046/auth/bootstrap" -ContentType "application/json" -Body '{"idConta":3,"senha":"1234"}'
+Invoke-RestMethod -Method Post -Uri "http://localhost:4046/transferencias" -ContentType "application/json" -Headers @{Authorization="Bearer $tk0"} -Body '{"idOrigem":0,"idDestino":3,"valor":25}'
+```
+
+### 3.4 - Ver o Relogio Vetorial e o Lider Bully nas 3 agencias
+
+```powershell
+# Status mostra agencia, relogioVetorialAtual e quantidadeContas (nao precisa de token)
+Invoke-RestMethod -Uri "http://localhost:4046/status"
+Invoke-RestMethod -Uri "http://localhost:4047/status"
+Invoke-RestMethod -Uri "http://localhost:4048/status"
+
+# Consultar quem cada agencia enxerga como lider atual no algoritmo de Bully
+Invoke-RestMethod -Uri "http://localhost:4046/bully/lider"
+Invoke-RestMethod -Uri "http://localhost:4047/bully/lider"
+Invoke-RestMethod -Uri "http://localhost:4048/bully/lider"
+```
+
+### 3.5 - Teste de resiliencia da fila RabbitMQ (agencia fora do ar)
+
+> **ATENCAO (para a fila nao zerar sozinha):** se voce tiver aberto os links do Render antes, as agencias da nuvem podem estar acordadas escutando a mesma `fila-agencia-1` no CloudAMQP e vao consumir a mensagem na hora! Faca este teste sem acordar o Render (ou olhe em *Consumers* no painel do CloudAMQP).
+
+```powershell
+# 1. Derrube a Agencia 1 (Ctrl+C no Terminal 2) e transfira da Conta 0 para a Conta 1:
+Invoke-RestMethod -Method Post -Uri "http://localhost:4046/transferencias" -ContentType "application/json" -Headers @{Authorization="Bearer $tk0"} -Body '{"idOrigem":0,"idDestino":1,"valor":50}'
+# Resposta: HTTP 200 - "Transferencia publicada..." (mensagem fica retida em fila-agencia-1 com Ready = 1!)
+
+# 2. Suba a Agencia 1 novamente no Terminal 2 - ela consome a mensagem da fila automaticamente.
+```
+
+### 3.6 - Testar alerta de saldo baixo (funcionalidade adicional Sprint 2)
+
+```powershell
+# Fazer saque que deixe o saldo abaixo de R$ 50,00
+Invoke-RestMethod -Method Post -Uri "http://localhost:4046/contas/0/sacar" -ContentType "application/json" -Headers @{Authorization="Bearer $tk0"} -Body '{"valor":310}'
+# No terminal da Agencia 0 aparece:
+# [Alerta] Saldo baixo na conta 0: R$ ... (limite: R$ 50.00)
+# [Mensageria] Publicado em agencia.0.alerta-saldo-baixo: {...}
+```
+
+---
+
+## PARTE 4 - Scripts de Observabilidade (Sprints 2 e 3)
 
 ```powershell
 cd C:\Users\Nicolas\Desktop\iceibank\agencia
