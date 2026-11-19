@@ -133,9 +133,13 @@ export default function App() {
                       <div className="stat-sub">Identificador</div>
                     </div>
                     <div className="stat-item">
-                      <div className="stat-label">Lamport</div>
-                      <div className="stat-value">{statusData.relogioLamportAtual}</div>
-                      <div className="stat-sub">Relógio lógico atual</div>
+                      <div className="stat-label">Relógio Vetorial</div>
+                      <div className="stat-value">
+                        {Array.isArray(statusData.relogioVetorialAtual)
+                          ? `[${statusData.relogioVetorialAtual.join(", ")}]`
+                          : statusData.relogioLamportAtual}
+                      </div>
+                      <div className="stat-sub">Vetor lógico atual</div>
                     </div>
                     <div className="stat-item">
                       <div className="stat-label">Contas</div>

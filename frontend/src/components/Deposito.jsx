@@ -36,11 +36,36 @@ export default function Deposito() {
         <MensagemErro mensagem={erro} onFechar={() => setErro(null)} />
 
         {res && (
-          <MensagemErro
-            mensagem={`Depósito realizado! Novo saldo: R$ ${res.saldo.toLocaleString("pt-BR", { minimumFractionDigits: 2 })}`}
-            tipo="success"
-            onFechar={() => setRes(null)}
-          />
+          <>
+            <MensagemErro
+              mensagem={`Depósito realizado! Novo saldo: R$ ${res.saldo.toLocaleString("pt-BR", { minimumFractionDigits: 2 })}`}
+              tipo="success"
+              onFechar={() => setRes(null)}
+            />
+            {res.saldo < 50 && (
+              <div style={{
+                marginTop: "0.75rem",
+                padding: "0.85rem 1.1rem",
+                borderRadius: 10,
+                background: "rgba(245, 158, 11, 0.12)",
+                border: "1px solid rgba(245, 158, 11, 0.4)",
+                color: "#fde68a",
+                fontSize: "0.85rem",
+                fontWeight: 500,
+                display: "flex",
+                alignItems: "center",
+                gap: "0.65rem"
+              }}>
+                <span>🔔</span>
+                <span>
+                  <b>Alerta de Saldo Baixo (&lt; R$ 50,00):</b> evento publicado no RabbitMQ na routing key{" "}
+                  <code style={{ background: "rgba(0,0,0,0.25)", padding: "2px 6px", borderRadius: 4, color: "#f0d060" }}>
+                    agencia.{Number(id) % 3}.alerta-saldo-baixo
+                  </code>
+                </span>
+              </div>
+            )}
+          </>
         )}
 
         <button type="submit" disabled={loading} className="btn btn-green btn-full" style={{ marginTop: "0.5rem" }}>
