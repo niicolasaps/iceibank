@@ -1,16 +1,12 @@
-﻿"""
-auth_controller.py — Endpoints de Autenticação do ICEIBank (Parte F, Seção 11)
-
-POST /auth/login     — recebe idConta + senha, retorna JWT se válido
-POST /auth/registrar — cadastra senha para conta existente (sem JWT — para setup inicial)
-
-O endpoint /auth/registrar existe apenas para facilitar testes durante o sprint.
-Em um sistema real, a senha seria definida na criação da conta ou via fluxo separado.
+"""
+auth_controller.py — Endpoints de Autenticacao do ICEIBank (Parte F, Secao 11)
+Atualizado no Sprint 4 para persistir mudancas de senha/bootstrap em `estado.salvar()`.
 """
 
 from fastapi import APIRouter, HTTPException, Request
 from pydantic import BaseModel
 
+from src import config
 from src.services.auth import criar_token
 
 router = APIRouter(prefix="/auth", tags=["auth"])
@@ -28,15 +24,12 @@ class RegistrarSenhaBody(BaseModel):
 
 @router.post("/login")
 def login(body: LoginBody, request: Request):
-    """
-    Autentica um usuário pelo id da conta e senha.
-    Retorna um JWT com expiração de 30 minutos.
-    """
-    contas = request.app.state.contas
-    conta = contas.get(body.idConta)
-
-    if conta is None or conta.get("senha") != body.senha:
-        raise HTTPException(status_code=401, detail="Credenciais inválidas.")
+    """Autentica um usuario pelo id da conta e senha. Retorna um JWT com expiracao de 30 minutos."""
+    estado = request.app.state.estado
+    with estado.lock:
+        conta = estado.contas.get(body.idConta)
+        if conta is None or conta.get("senha") != body.senha:
+            raise HTTPException(status_code=401, detail="Credenciais inválidas.")
 
     token = criar_token({"sub": str(body.idConta), "idConta": body.idConta})
     return {"token": token}
@@ -44,17 +37,14 @@ def login(body: LoginBody, request: Request):
 
 @router.post("/registrar")
 def registrar_senha(body: RegistrarSenhaBody, request: Request):
-    """
-    Cadastra (ou atualiza) a senha de uma conta existente.
-    Não exige JWT — é o endpoint de setup inicial para testes.
-    """
-    contas = request.app.state.contas
-    conta = contas.get(body.idConta)
-
-    if conta is None:
-        raise HTTPException(status_code=404, detail="Conta não encontrada nesta agência.")
-
-    conta["senha"] = body.senha
+    """Cadastra (ou atualiza) a senha de uma conta existente (persistido em disco)."""
+    estado = request.app.state.estado
+    with estado.lock:
+        conta = estado.contas.get(body.idConta)
+        if conta is None:
+            raise HTTPException(status_code=404, detail="Conta não encontrada nesta agência.")
+        conta["senha"] = body.senha
+        estado.salvar()
     return {"mensagem": f"Senha da conta {body.idConta} cadastrada com sucesso."}
 
 
@@ -62,20 +52,27 @@ def registrar_senha(body: RegistrarSenhaBody, request: Request):
 def bootstrap(body: RegistrarSenhaBody, request: Request):
     """
     Cria a senha de uma conta existente OU cria a conta com saldo 0, sem JWT.
-    Necessario apenas para o setup inicial de testes.
-    Esta rota nao existiria em producao.
+    Persiste imediatamente no EstadoDuravel para sobreviver a `docker compose restart`.
     """
-    contas = request.app.state.contas
+    estado = request.app.state.estado
     id_agencia = request.app.state.id_agencia
 
-    # Criar conta minima se nao existir ainda
-    if body.idConta not in contas:
-        from src import config as cfg
-        if cfg.agencia_responsavel(body.idConta) != id_agencia:
-            from fastapi import HTTPException
-            raise HTTPException(400, detail=f"Conta {body.idConta} nao pertence a esta agencia.")
-        contas[body.idConta] = {"id": body.idConta, "nomeAluno": f"Usuario {body.idConta}", "saldo": 0.0, "senha": body.senha}
-        return {"mensagem": f"Conta {body.idConta} criada com senha. Use POST /contas para atualizar os dados apos o login."}
+    with estado.lock:
+        if body.idConta not in estado.contas:
+            if config.agencia_responsavel(body.idConta) != id_agencia:
+                raise HTTPException(400, detail=f"Conta {body.idConta} nao pertence a esta agencia.")
+            nome = f"Usuario {body.idConta}"
+            estado.contas[body.idConta] = {
+                "id": body.idConta,
+                "titular": nome,
+                "nomeAluno": nome,
+                "saldo": 0.0,
+                "reservado": 0.0,
+                "senha": body.senha,
+            }
+            estado.salvar()
+            return {"mensagem": f"Conta {body.idConta} criada com senha. Use POST /contas para atualizar os dados apos o login."}
 
-    contas[body.idConta]["senha"] = body.senha
-    return {"mensagem": f"Senha da conta {body.idConta} definida com sucesso."}
+        estado.contas[body.idConta]["senha"] = body.senha
+        estado.salvar()
+        return {"mensagem": f"Senha da conta {body.idConta} definida com sucesso."}

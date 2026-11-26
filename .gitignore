@@ -14,8 +14,10 @@ venv/
 ENV/
 env/
 
-# Logs gerados em runtime — não versionar
+# Segredos e estado de runtime (nao versionar)
+.env
 agencia/data/
+serverless/build/
 
 # IDEs
 .vscode/

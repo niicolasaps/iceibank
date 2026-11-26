@@ -1,16 +1,12 @@
 """
-main.py - Ponto de entrada da agencia ICEIBank
+main.py - Ponto de entrada da agencia ICEIBank (Sprint 4)
+Equivalente ao app.js da secao 5.8 do roteiro Node.js.
 
-Sprint 2:
-  - RelogioVetorial substitui RelogioLamport
-  - Consumidor RabbitMQ (pika) iniciado em thread separada no startup
-  - RABBITMQ_URL deve estar definida como variavel de ambiente
-
-Como executar localmente:
-  $env:RABBITMQ_URL="amqps://usuario:senha@host.cloudamqp.com/vhost"
-  $env:AGENCIA_ID="0"; python -m uvicorn src.main:app --port 4046 --reload
-  $env:AGENCIA_ID="1"; python -m uvicorn src.main:app --port 4047 --reload
-  $env:AGENCIA_ID="2"; python -m uvicorn src.main:app --port 4048 --reload
+Sprint 4 (Parte A):
+  - EstadoDuravel persiste contas, reservas, coordenacoes e participacoes em DATA_DIR
+  - TOKEN_INTERNO e obrigatorio (protege rotas internas do Bully e 2PC)
+  - RabbitMQ passa a ser opcional (nao bloqueia a subida em container sem RABBITMQ_URL)
+  - `python -m src.main` sobe o uvicorn em 0.0.0.0 na porta PORTA_BASE + AGENCIA_ID
 """
 
 import os
@@ -18,29 +14,45 @@ import sys
 import threading
 import time
 
-from fastapi import FastAPI
+import uvicorn
+from fastapi import FastAPI, Request
 from fastapi.middleware.cors import CORSMiddleware
+from fastapi.responses import JSONResponse
 
 from src import config
+from src.middlewares.autenticacao_interna import TokenInternoInvalido
 from src.routes import router
-from src.services.auth import criar_token_servico
 from src.services import bully_service
+from src.services.armazenamento import EstadoDuravel
+from src.services.auth import criar_token_servico
 from src.services.bully_service import ServicoBully
 from src.services.event_log import RegistroEventos
-from src.services.mensageria import assinar
+from src.services.eventos_nuvem import EventosNuvem
 from src.services.vector_clock import RelogioVetorial
 
-id_agencia = int(os.environ.get("AGENCIA_ID", "0"))
+try:
+    id_agencia = int(os.environ.get("AGENCIA_ID", "0"))
+except ValueError:
+    id_agencia = -1
 
-agencia_cfg = next((a for a in config.AGENCIAS if a["id"] == id_agencia), None)
-if agencia_cfg is None:
-    print(f"Agencia {id_agencia} nao configurada em config.py", file=sys.stderr)
+if id_agencia not in (0, 1, 2):
+    print("Defina AGENCIA_ID com 0, 1 ou 2.", file=sys.stderr)
     sys.exit(1)
+
+if not config.TOKEN_INTERNO:
+    print("Defina TOKEN_INTERNO (segredo compartilhado entre as agências).", file=sys.stderr)
+    sys.exit(1)
+
+estado = EstadoDuravel(id_agencia)
+relogio = RelogioVetorial(id_agencia, config.NUMERO_AGENCIAS)
+registro = RegistroEventos(f"agencia-{id_agencia}")
+bully = ServicoBully(id_agencia, relogio, registro)
+eventos_nuvem = EventosNuvem(id_agencia, relogio, registro)
 
 app = FastAPI(
     title=f"ICEIBank - Agencia {id_agencia}",
-    description="API REST do ICEIBank com Relogio Vetorial e RabbitMQ (Sprint 2)",
-    version="2.0.0",
+    description="API REST do ICEIBank com Persistencia, Docker, Bully e 2PC (Sprint 4)",
+    version="4.0.0",
 )
 
 app.add_middleware(
@@ -51,75 +63,44 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
+
+@app.exception_handler(TokenInternoInvalido)
+async def _tratar_token_interno_invalido(_request: Request, _exc: TokenInternoInvalido):
+    return JSONResponse(
+        status_code=401,
+        content={"erro": "Token interno ausente ou inválido."},
+    )
+
+
 app.state.id_agencia = id_agencia
-app.state.relogio = RelogioVetorial(id_agencia, config.NUMERO_AGENCIAS)
-app.state.registro = RegistroEventos(f"agencia-{id_agencia}")
-app.state.bully = ServicoBully(id_agencia, app.state.relogio, app.state.registro)
-app.state.contas = {}
+app.state.estado = estado
+# Alias para qualquer código legado que leia `app.state.contas`
+app.state.contas = estado.contas
+app.state.relogio = relogio
+app.state.registro = registro
+app.state.bully = bully
+app.state.eventos_nuvem = eventos_nuvem
 app.state.token_servico = criar_token_servico()
 
 app.include_router(router)
 
 
 @app.on_event("startup")
-def iniciar_consumidor():
+def iniciar_servicos_background():
     """
-    Inicia o consumidor RabbitMQ em thread separada ao subir o servidor.
-    Thread daemon=True: termina automaticamente quando o processo para.
-    """
-    relogio = app.state.relogio
-    registro = app.state.registro
-    contas = app.state.contas
-
-    def processar_credito(mensagem):
-        id_conta = mensagem.get("idConta")
-        valor = mensagem.get("valor")
-        vetor_envio = mensagem.get("vetorEnvio")
-        origem_agencia = mensagem.get("origemAgencia")
-
-        vetor = relogio.ao_receber(vetor_envio)
-
-        conta = contas.get(id_conta)
-        if conta is None:
-            registro.registrar("CREDITO_REMOTO_FALHOU", vetor, {
-                "idConta": id_conta,
-                "valor": valor,
-                "origemAgencia": origem_agencia,
-                "motivo": "conta nao encontrada",
-            })
-            print(f"[Consumidor] ATENCAO: conta {id_conta} nao encontrada - credito de R${valor} nao aplicado!")
-            return
-
-        conta["saldo"] += valor
-        saldo_fmt = f"{conta['saldo']:.2f}"
-        registro.registrar("TRANSFERENCIA_CREDITO_REMOTO", vetor, {
-            "idConta": id_conta,
-            "valor": valor,
-            "origemAgencia": origem_agencia,
-        })
-        print(f"[Consumidor] Credito de R${valor} aplicado na conta {id_conta}. Novo saldo: R${saldo_fmt}")
-
-    assinar(id_agencia, processar_credito)
-
-
-@app.on_event("startup")
-def iniciar_bully():
-    """
-    Sprint 3 - Parte A: dispara a eleicao inicial em background.
-    Equivalente a bully.iniciarEleicao() dentro do callback do app.listen.
-    Em thread para nao bloquear a subida: as outras agencias precisam conseguir
-    chamar /bully/eleicao desta enquanto ela ainda esta iniciando.
+    Dispara a eleicao inicial e o heartbeat do Bully em background apos o servidor subir.
+    (Nas Partes B e C tambem iniciara participante.iniciar_resolucao() e coordenador.iniciar_reentrega()).
     """
     def _eleicao_inicial():
-        time.sleep(bully_service.ATRASO_INICIAL_S)  # aguarda o servidor comecar a ouvir
+        time.sleep(bully_service.ATRASO_INICIAL_S)
         app.state.bully.iniciar_eleicao()
 
     threading.Thread(target=_eleicao_inicial, daemon=True).start()
-
-    # Parte B: equivalente a bully.iniciarHeartbeat() logo apos iniciarEleicao()
     app.state.bully.iniciar_heartbeat()
 
 
-porta = os.environ.get("PORT", str(config.PORTA_BASE + id_agencia))
-print(f"[Agencia {id_agencia}] ouvindo na porta {porta}")
-print(f"[Agencia {id_agencia}] Documentacao: http://localhost:{porta}/docs")
+porta = int(os.environ.get("PORT", str(config.PORTA_BASE + id_agencia)))
+print(f"Agência {id_agencia} no ar na porta {porta}")
+
+if __name__ == "__main__":
+    uvicorn.run(app, host="0.0.0.0", port=porta)

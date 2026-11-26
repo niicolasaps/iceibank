@@ -29,9 +29,8 @@ import threading
 import time
 from typing import List, Optional
 
-import httpx
-
 from src import config
+from src.services.cliente_interno import cliente_interno
 from src.services.event_log import RegistroEventos
 from src.services.vector_clock import RelogioVetorial
 
@@ -96,7 +95,7 @@ class ServicoBully:
         for agencia in maiores:
             try:
                 vetor_envio = self.relogio.ao_enviar()
-                httpx.post(
+                cliente_interno.post(
                     f"{agencia['url']}/bully/eleicao",
                     json={"origemId": self.id_agencia, "vetorEnvio": vetor_envio},
                     timeout=TIMEOUT_S,
@@ -124,7 +123,7 @@ class ServicoBully:
                 continue
             try:
                 vetor_envio = self.relogio.ao_enviar()
-                httpx.post(
+                cliente_interno.post(
                     f"{agencia['url']}/bully/coordenador",
                     json={"liderId": self.id_agencia, "vetorEnvio": vetor_envio},
                     timeout=TIMEOUT_S,
@@ -165,7 +164,7 @@ class ServicoBully:
 
         lider_info = next(a for a in config.AGENCIAS if a["id"] == lider_atual)
         try:
-            httpx.get(f"{lider_info['url']}/bully/lider", timeout=TIMEOUT_S)
+            cliente_interno.get(f"{lider_info['url']}/bully/lider", timeout=TIMEOUT_S)
         except Exception:
             vetor = self.relogio.evento_local()
             self.registro.registrar(

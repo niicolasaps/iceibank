@@ -28,14 +28,12 @@ import pika.exceptions
 RABBITMQ_URL = os.environ.get("RABBITMQ_URL")
 EXCHANGE = "iceibank.eventos"
 
-if not RABBITMQ_URL:
-    print(
-        "[ERRO] Defina a variavel de ambiente RABBITMQ_URL com a URL AMQP da sua instancia CloudAMQP "
-        "antes de iniciar.\n"
-        "Exemplo: $env:RABBITMQ_URL=\"amqps://usuario:senha@host.cloudamqp.com/vhost\"",
-        file=sys.stderr,
-    )
-    sys.exit(1)
+# Sprint 4: a mensageria e OPCIONAL. A transferencia entre agencias agora e exclusivamente 2PC,
+# entao a agencia sobe sem RabbitMQ. Sem RABBITMQ_URL, publicar() nao faz nada
+# (o alerta de saldo baixo do Sprint 2 so e publicado se a URL estiver definida).
+HABILITADA = bool(RABBITMQ_URL)
+if not HABILITADA:
+    print("[Mensageria] RABBITMQ_URL nao definida: mensageria desativada (opcional no Sprint 4).")
 
 
 def _criar_conexao() -> pika.BlockingConnection:
@@ -55,6 +53,8 @@ def publicar(routing_key: str, mensagem: dict) -> None:
     durable=True + delivery_mode=2 garantem que a mensagem nao se perde se a
     agencia de destino estiver fora do ar no momento da publicacao.
     """
+    if not HABILITADA:
+        return
     conexao = _criar_conexao()
     canal = conexao.channel()
     canal.exchange_declare(exchange=EXCHANGE, exchange_type="topic", durable=True)

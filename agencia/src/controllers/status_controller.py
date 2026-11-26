@@ -1,6 +1,6 @@
 """
 status_controller.py - Funcionalidade adicional do Sprint 1 (GET /status)
-Atualizado no Sprint 2 para exibir o relogio vetorial no lugar do Lamport.
+Atualizado no Sprint 4 para ler a quantidade de contas do EstadoDuravel.
 """
 
 from fastapi import APIRouter, Request
@@ -15,8 +15,11 @@ def status(request: Request):
     Retorna o estado atual da agencia: id, vetor de relogio e quantidade de contas.
     """
     relogio = request.app.state.relogio
+    estado = request.app.state.estado
+    with estado.lock:
+        qtd = len(estado.contas)
     return {
         "agencia": request.app.state.id_agencia,
         "relogioVetorialAtual": relogio.vetor_atual(),
-        "quantidadeContas": len(request.app.state.contas),
+        "quantidadeContas": qtd,
     }

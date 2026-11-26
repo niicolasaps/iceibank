@@ -18,6 +18,8 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import List
 
+from src import config
+
 
 class RegistroEventos:
     """
@@ -27,7 +29,9 @@ class RegistroEventos:
 
     def __init__(self, nome_agencia: str) -> None:
         self.nome_agencia = nome_agencia
-        base_dir = Path(__file__).parent.parent.parent / "data"
+        # Sprint 4: logs em DATA_DIR (em container, /dados - um volume). Fora de container,
+        # o padrao continua sendo agencia/data, onde mesclar_logs.py e historico_lideranca.py leem.
+        base_dir = Path(config.DATA_DIR)
         base_dir.mkdir(parents=True, exist_ok=True)
         self.caminho_arquivo = base_dir / f"eventos-{nome_agencia}.jsonl"
 

@@ -1,0 +1,51 @@
+services:
+  agencia-0:
+    build: ./agencia
+    environment: &comum
+      AGENCIA_ID: "0"
+      FALHA_2PC: "${FALHA_2PC_0:-}"
+      TOKEN_INTERNO: ${TOKEN_INTERNO:?defina TOKEN_INTERNO no arquivo .env}
+      PORTA_BASE: "4046"
+      AGENCIAS_HOSTS: agencia-0,agencia-1,agencia-2
+      # Nuvem local (Parte F). Com SNS_TOPIC_ARN vazio, a agência não publica eventos.
+      AWS_ENDPOINT_URL: http://localstack:4566
+      AWS_REGION: us-east-1
+      AWS_ACCESS_KEY_ID: test
+      AWS_SECRET_ACCESS_KEY: test
+      SNS_TOPIC_ARN: ${SNS_TOPIC_ARN:-}
+    ports: ["4046:4046"]
+    volumes: ["dados-0:/dados"]
+    restart: on-failure
+  agencia-1:
+    build: ./agencia
+    environment:
+      <<: *comum
+      AGENCIA_ID: "1"
+      FALHA_2PC: "${FALHA_2PC_1:-}"
+    ports: ["4047:4047"]
+    volumes: ["dados-1:/dados"]
+    restart: on-failure
+  agencia-2:
+    build: ./agencia
+    environment:
+      <<: *comum
+      AGENCIA_ID: "2"
+      FALHA_2PC: "${FALHA_2PC_2:-}"
+    ports: ["4048:4048"]
+    volumes: ["dados-2:/dados"]
+    restart: on-failure
+  localstack:
+    profiles: ["nuvem"]   # só sobe com: docker compose --profile nuvem up
+    image: localstack/localstack
+    ports: ["4566:4566"]
+    environment:
+      LOCALSTACK_AUTH_TOKEN: ${LOCALSTACK_AUTH_TOKEN:-}
+    volumes:
+      - /var/run/docker.sock:/var/run/docker.sock   # o LocalStack cria containers para executar as Lambdas
+      - ./localstack:/scripts:ro
+      - ./serverless/build:/serverless:ro
+
+volumes:
+  dados-0:
+  dados-1:
+  dados-2:
