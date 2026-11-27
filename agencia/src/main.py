@@ -1,12 +1,17 @@
 """
-main.py - Ponto de entrada da agencia ICEIBank (Sprint 4)
+main.py - Ponto de entrada da agencia ICEIBank (Sprint 4 - versao final da secao 5.8)
 Equivalente ao app.js da secao 5.8 do roteiro Node.js.
 
-Sprint 4 (Parte A):
-  - EstadoDuravel persiste contas, reservas, coordenacoes e participacoes em DATA_DIR
-  - TOKEN_INTERNO e obrigatorio (protege rotas internas do Bully e 2PC)
-  - RabbitMQ passa a ser opcional (nao bloqueia a subida em container sem RABBITMQ_URL)
-  - `python -m src.main` sobe o uvicorn em 0.0.0.0 na porta PORTA_BASE + AGENCIA_ID
+Ordem de inicializacao (identica ao app.js):
+  1. Instancia EstadoDuravel, RelogioVetorial, RegistroEventos, ServicoBully, EventosNuvem,
+     Coordenador e Participante.
+  2. Chama `coordenador.recuperar()` ANTES de aceitar requisicoes (decide ABORT para
+     transacoes que estavam em PREPARANDO quando a agencia caiu - aborto presumido).
+  3. No startup (apos o servidor subir), inicia em background:
+       - participante.iniciar_resolucao()
+       - coordenador.iniciar_reentrega()
+       - bully.iniciar_eleicao()
+       - bully.iniciar_heartbeat()
 """
 
 import os
@@ -26,6 +31,7 @@ from src.services import bully_service
 from src.services.armazenamento import EstadoDuravel
 from src.services.auth import criar_token_servico
 from src.services.bully_service import ServicoBully
+from src.services.coordenador import Coordenador
 from src.services.event_log import RegistroEventos
 from src.services.eventos_nuvem import EventosNuvem
 from src.services.participante import Participante
@@ -49,7 +55,12 @@ relogio = RelogioVetorial(id_agencia, config.NUMERO_AGENCIAS)
 registro = RegistroEventos(f"agencia-{id_agencia}")
 bully = ServicoBully(id_agencia, relogio, registro)
 eventos_nuvem = EventosNuvem(id_agencia, relogio, registro)
+coordenador = Coordenador(id_agencia, relogio, registro, estado, eventos_nuvem)
 participante = Participante(id_agencia, relogio, registro, estado)
+
+# Recuperacao ANTES de aceitar requisicoes: decide o destino das transacoes
+# que estavam em andamento quando a agencia caiu (aborto presumido).
+coordenador.recuperar()
 
 app = FastAPI(
     title=f"ICEIBank - Agencia {id_agencia}",
@@ -76,12 +87,12 @@ async def _tratar_token_interno_invalido(_request: Request, _exc: TokenInternoIn
 
 app.state.id_agencia = id_agencia
 app.state.estado = estado
-# Alias para qualquer código legado que leia `app.state.contas`
 app.state.contas = estado.contas
 app.state.relogio = relogio
 app.state.registro = registro
 app.state.bully = bully
 app.state.eventos_nuvem = eventos_nuvem
+app.state.coordenador = coordenador
 app.state.participante = participante
 app.state.token_servico = criar_token_servico()
 
@@ -91,11 +102,11 @@ app.include_router(router)
 @app.on_event("startup")
 def iniciar_servicos_background():
     """
-    Roda em background DEPOIS que o servidor esta ouvindo (como o callback de app.listen do Node):
-    resolucao de duvida do participante 2PC, eleicao inicial e heartbeat do Bully.
-    (Na Parte C tambem iniciara coordenador.iniciar_reentrega() e, antes de servir, coordenador.recuperar().)
+    Equivalente ao callback de app.listen(escutar, () => { ... }) do Node:
+    inicia resolucao de duvida do participante, reentrega do coordenador, eleicao e heartbeat.
     """
     app.state.participante.iniciar_resolucao()
+    app.state.coordenador.iniciar_reentrega()
 
     def _eleicao_inicial():
         time.sleep(bully_service.ATRASO_INICIAL_S)

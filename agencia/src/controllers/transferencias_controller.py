@@ -1,22 +1,28 @@
 """
-transferencias_controller.py - Controlador de Transferencias do ICEIBank
-Equivalente ao transferenciasController.js do roteiro.
+transferencias_controller.py - Controlador de Transferencias via 2PC (Sprint 4, Parte C)
+Equivalente ao transferenciasController.js da secao 7.2 do roteiro Node.js.
 
-Sprint 2: a chamada REST direta (creditar-remoto) foi substituida por
-mensageria assincrona via RabbitMQ. A rota /contas/{id}/creditar-remoto
-foi REMOVIDA - o credito remoto agora chega pela fila, consumido em main.py.
+Qualquer agencia recebe o pedido do cliente (POST /transferencias, protegido por JWT),
+mas quem COORDENA o 2PC e sempre o lider eleito pelo Bully. Se esta agencia nao for o
+lider, encaminha o pedido ao lider pela rota interna POST /2pc/coordenar (protegida por
+`x-token-interno`).
 
-Mudanca de semantica:
-  Sprint 1: HTTP 200 = credito JA aplicado na outra agencia.
-  Sprint 2: HTTP 200 = mensagem PUBLICADA na fila (credito sera aplicado de forma assincrona).
+Codigos HTTP (identicos ao roteiro):
+  - 200: resultado == 'COMMIT'
+  - 422: resultado == 'ABORT' (com `motivos`)
+  - 400: dados invalidos / origem == destino
+  - 503: sem lider eleito ou coordenador indisponivel
+  - 409: POST /2pc/coordenar chamado em uma agencia que nao e a lider
 """
 
-from fastapi import APIRouter, Depends, HTTPException, Request
+from fastapi import APIRouter, Depends, Request
+from fastapi.responses import JSONResponse
 from pydantic import BaseModel
 
 from src import config
+from src.middlewares.autenticacao_interna import autenticacao_interna
 from src.services.auth import get_usuario_atual
-from src.services.mensageria import publicar
+from src.services.cliente_interno import criar_cliente_interno_async
 
 router = APIRouter()
 
@@ -27,60 +33,56 @@ class TransferenciaBody(BaseModel):
     valor: float
 
 
+def _erro(status_code: int, msg: str) -> JSONResponse:
+    """Inclui tanto `erro` (contrato Sprint 4) quanto `detail` (frontend web React / app Flutter)."""
+    return JSONResponse(status_code=status_code, content={"erro": msg, "detail": msg})
+
+
 @router.post("/transferencias")
 async def transferir(
     body: TransferenciaBody,
     request: Request,
     _usuario=Depends(get_usuario_atual),
 ):
-    contas = request.app.state.contas
-    relogio = request.app.state.relogio
-    registro = request.app.state.registro
+    if body.valor <= 0:
+        return _erro(400, "Informe idOrigem, idDestino (inteiros) e valor (> 0).")
+    if body.idOrigem == body.idDestino:
+        return _erro(400, "Origem e destino devem ser diferentes.")
+
+    bully = request.app.state.bully
+    coordenador = request.app.state.coordenador
     id_agencia = request.app.state.id_agencia
 
-    conta_origem = contas.get(body.idOrigem)
-    if conta_origem is None:
-        raise HTTPException(status_code=404, detail="Conta de origem nao encontrada nesta agencia.")
-    if conta_origem["saldo"] < body.valor:
-        raise HTTPException(status_code=400, detail="Saldo insuficiente.")
+    lider = bully.obter_lider_atual()
+    if lider is None:
+        return _erro(503, "Sem líder eleito no momento. Tente novamente.")
 
-    agencia_destino = config.agencia_responsavel(body.idDestino)
+    try:
+        if lider == id_agencia:
+            r = await coordenador.coordenar(body.idOrigem, body.idDestino, body.valor)
+            return JSONResponse(status_code=200 if r["resultado"] == "COMMIT" else 422, content=r)
 
-    # Debito com evento local (vetor vetorial)
-    vetor_debito = relogio.evento_local()
-    conta_origem["saldo"] -= body.valor
-    registro.registrar("TRANSFERENCIA_DEBITO", vetor_debito, {
-        "idOrigem": body.idOrigem, "idDestino": body.idDestino, "valor": body.valor
-    })
-
-    # Transferencia local (mesma agencia)
-    if agencia_destino == id_agencia:
-        conta_destino = contas.get(body.idDestino)
-        if conta_destino is None:
-            conta_origem["saldo"] += body.valor  # rollback local
-            raise HTTPException(status_code=404, detail="Conta de destino nao encontrada.")
-        vetor_credito = relogio.evento_local()
-        conta_destino["saldo"] += body.valor
-        registro.registrar("TRANSFERENCIA_CREDITO", vetor_credito, {
-            "idOrigem": body.idOrigem, "idDestino": body.idDestino, "valor": body.valor
-        })
-        return {"mensagem": "Transferencia concluida (mesma agencia)."}
-
-    # Transferencia entre agencias - publica na fila via RabbitMQ
-    # (Sprint 1 fazia chamada REST direta aqui - agora e assincrono)
-    vetor_envio = relogio.ao_enviar()
-    await _publicar_async(f"agencia.{agencia_destino}.creditar", {
-        "idConta": body.idDestino,
-        "valor": body.valor,
-        "vetorEnvio": vetor_envio,
-        "origemAgencia": id_agencia,
-    })
-
-    return {"mensagem": "Transferencia publicada para a agencia de destino (entrega assincrona)."}
+        url = next(a["url"] for a in config.AGENCIAS if a["id"] == lider)
+        async with criar_cliente_interno_async() as client:
+            resp = await client.post(
+                f"{url}/2pc/coordenar",
+                json={"idOrigem": body.idOrigem, "idDestino": body.idDestino, "valor": body.valor},
+                timeout=15.0,
+            )
+            return JSONResponse(status_code=resp.status_code, content=resp.json())
+    except Exception:
+        return _erro(503, "Coordenador indisponível. Nada foi aplicado; tente novamente.")
 
 
-async def _publicar_async(routing_key: str, mensagem: dict) -> None:
-    """Chama publicar() de forma compativel com o event loop do FastAPI."""
-    import asyncio
-    loop = asyncio.get_event_loop()
-    await loop.run_in_executor(None, publicar, routing_key, mensagem)
+# Rota interna: outra agencia pede para este lider coordenar.
+@router.post("/2pc/coordenar", dependencies=[Depends(autenticacao_interna)])
+async def coordenar_a_requisicao(body: TransferenciaBody, request: Request):
+    bully = request.app.state.bully
+    coordenador = request.app.state.coordenador
+    id_agencia = request.app.state.id_agencia
+
+    if bully.obter_lider_atual() != id_agencia:
+        return _erro(409, "Esta agência não é a líder.")
+
+    r = await coordenador.coordenar(body.idOrigem, body.idDestino, body.valor)
+    return JSONResponse(status_code=200 if r["resultado"] == "COMMIT" else 422, content=r)
