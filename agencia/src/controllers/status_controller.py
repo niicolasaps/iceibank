@@ -23,3 +23,17 @@ def status(request: Request):
         "relogioVetorialAtual": relogio.vetor_atual(),
         "quantidadeContas": qtd,
     }
+
+
+@router.get("/saude")
+def saude(request: Request):
+    """
+    Funcionalidade adicional do Sprint 4 (Secao 2.1):
+    Endpoint publico GET /saude (sem JWT e sem x-token-interno) usado pelo `healthcheck`
+    do docker-compose.yml para monitorar a saude dos containers das 3 agencias.
+    """
+    return {
+        "status": "ok",
+        "idAgencia": request.app.state.id_agencia,
+        "liderAtual": request.app.state.bully.obter_lider_atual(),
+    }

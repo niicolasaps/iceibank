@@ -16,6 +16,12 @@ services:
     ports: ["4046:4046"]
     volumes: ["dados-0:/dados"]
     restart: on-failure
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://localhost:4046/saude', timeout=2)"]
+      interval: 10s
+      timeout: 3s
+      retries: 3
+      start_period: 5s
   agencia-1:
     build: ./agencia
     environment:
@@ -25,6 +31,12 @@ services:
     ports: ["4047:4047"]
     volumes: ["dados-1:/dados"]
     restart: on-failure
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://localhost:4047/saude', timeout=2)"]
+      interval: 10s
+      timeout: 3s
+      retries: 3
+      start_period: 5s
   agencia-2:
     build: ./agencia
     environment:
@@ -34,6 +46,12 @@ services:
     ports: ["4048:4048"]
     volumes: ["dados-2:/dados"]
     restart: on-failure
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://localhost:4048/saude', timeout=2)"]
+      interval: 10s
+      timeout: 3s
+      retries: 3
+      start_period: 5s
   localstack:
     profiles: ["nuvem"]   # só sobe com: docker compose --profile nuvem up
     image: localstack/localstack
