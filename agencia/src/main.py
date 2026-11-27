@@ -28,6 +28,7 @@ from src.services.auth import criar_token_servico
 from src.services.bully_service import ServicoBully
 from src.services.event_log import RegistroEventos
 from src.services.eventos_nuvem import EventosNuvem
+from src.services.participante import Participante
 from src.services.vector_clock import RelogioVetorial
 
 try:
@@ -48,6 +49,7 @@ relogio = RelogioVetorial(id_agencia, config.NUMERO_AGENCIAS)
 registro = RegistroEventos(f"agencia-{id_agencia}")
 bully = ServicoBully(id_agencia, relogio, registro)
 eventos_nuvem = EventosNuvem(id_agencia, relogio, registro)
+participante = Participante(id_agencia, relogio, registro, estado)
 
 app = FastAPI(
     title=f"ICEIBank - Agencia {id_agencia}",
@@ -80,6 +82,7 @@ app.state.relogio = relogio
 app.state.registro = registro
 app.state.bully = bully
 app.state.eventos_nuvem = eventos_nuvem
+app.state.participante = participante
 app.state.token_servico = criar_token_servico()
 
 app.include_router(router)
@@ -88,9 +91,12 @@ app.include_router(router)
 @app.on_event("startup")
 def iniciar_servicos_background():
     """
-    Dispara a eleicao inicial e o heartbeat do Bully em background apos o servidor subir.
-    (Nas Partes B e C tambem iniciara participante.iniciar_resolucao() e coordenador.iniciar_reentrega()).
+    Roda em background DEPOIS que o servidor esta ouvindo (como o callback de app.listen do Node):
+    resolucao de duvida do participante 2PC, eleicao inicial e heartbeat do Bully.
+    (Na Parte C tambem iniciara coordenador.iniciar_reentrega() e, antes de servir, coordenador.recuperar().)
     """
+    app.state.participante.iniciar_resolucao()
+
     def _eleicao_inicial():
         time.sleep(bully_service.ATRASO_INICIAL_S)
         app.state.bully.iniciar_eleicao()

@@ -141,9 +141,19 @@ class ServicoBully:
         threading.Thread(target=self.iniciar_eleicao, daemon=True).start()
 
     def receber_coordenador(self, lider_id: int, vetor_recebido: List[int]) -> None:
+        vetor = self.relogio.ao_receber(vetor_recebido)
+        # Regra do Bully (Sprint 4, secao 6.4): um lider com id MENOR que o meu nao vale. Isso
+        # acontece quando uma agencia sobe antes das outras e se autoproclama lider. Em vez de
+        # aceitar, disputo a lideranca (e vou vencer, pois meu id e maior). A eleicao roda em
+        # background: a rota precisa responder logo (dispara e esquece, como no Node).
+        if lider_id < self.id_agencia:
+            self.registro.registrar(
+                "LIDER_MENOR_REJEITADO", vetor, {"liderId": lider_id, "agencia": self.id_agencia}
+            )
+            threading.Thread(target=self.iniciar_eleicao, daemon=True).start()
+            return
         with self._lock:
             self._lider_atual = lider_id
-        vetor = self.relogio.ao_receber(vetor_recebido)
         self.registro.registrar("LIDER_ANUNCIADO", vetor, {"liderId": lider_id, "agencia": self.id_agencia})
 
     def obter_lider_atual(self) -> Optional[int]:
