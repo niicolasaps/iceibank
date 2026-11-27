@@ -1281,3 +1281,145 @@ Usamos `urllib.request` da biblioteca padrao do Python para funcionar na imagem 
 **Evidencia:** `evidencias/sprint4/funcionalidade-adicional.png`
 
 ---
+
+## Secao 10.7 - Perguntas sobre Nuvem Local com LocalStack (Containers + Serverless)
+
+### Pergunta 1
+**A Lambda `gerar-comprovante` e idempotente. Mostre no codigo onde isso e garantido e descreva um cenario concreto em que a mesma mensagem chega duas vezes.**
+
+No codigo de `serverless/gerar-comprovante/index.py`, a idempotencia e garantida em duas camadas:
+  1. **No DynamoDB (escrita condicional atomica):**
+     ```python
+     try:
+         tabela.put_item(
+             Item={
+                 "txId": ev["txId"],
+                 "resultado": ev["resultado"],
+                 "valor": Decimal(str(ev["valor"])),
+                 "idOrigem": int(ev["idOrigem"]),
+                 "idDestino": int(ev["idDestino"]),
+                 "emitidoEm": emitido_em,
+             },
+             ConditionExpression="attribute_not_exists(txId)",
+         )
+     except ClientError as erro:
+         codigo = erro.response.get("Error", {}).get("Code")
+         if codigo != "ConditionalCheckFailedException":
+             raise
+     ```
+     Quando a mesma mensagem chega pela segunda vez com o mesmo `txId`, o DynamoDB recusa a
+     sobrescrita levantando `ConditionalCheckFailedException`, que a Lambda captura e ignora
+     como "ja processado com sucesso" (nao adiciona em `batchItemFailures`, permitindo ao SQS
+     remover a duplicata da fila).
+  2. **No S3 (chave deterministica por `txId`):** `Key=f"comprovantes/{ev['txId']}.json"` usa o
+     proprio UUID da transacao como nome do objeto (`put_object` sobre a mesma chave apenas
+     mantem um unico arquivo para aquele `txId`, sem criar arquivos duplicados).
+
+**Cenario concreto em que a mesma mensagem chega duas vezes:**
+  - As filas SQS padrao (*Standard Queues*) garantem entrega ***at-least-once*** (pelo menos uma
+    vez): o proprio broker distribuido do SQS pode entregar duas copias da mesma mensagem em um
+    mesmo lote ou em lotes seguidos.
+  - Alem disso, se a Lambda receber um lote com 2 mensagens (`M1` e `M2`), gravar `M1` no S3 e
+    no DynamoDB com sucesso, mas o container da Lambda sofrer *timeout* (ou queda de rede) no
+    meio de `M2` antes de devolver a resposta ao *event source mapping* do SQS, o
+    *Visibility Timeout* de ambas expira na fila e o SQS **reentrega `M1` e `M2` novamente** na
+    proxima invocacao.
+
+### Pergunta 2
+**Por que usar `batchItemFailures` em vez de simplesmente lancar uma excecao quando uma mensagem do lote falha? O que aconteceria com as outras mensagens do lote?**
+
+O *event source mapping* entre SQS e Lambda entrega mensagens em **lotes** (`--batch-size 5` no
+nosso `init.sh`).
+  - **Se a Lambda lancar uma excecao nao tratada** quando a 3ª mensagem do lote falha: a AWS
+    Lambda considera que **o lote inteiro de 5 mensagens falhou**. Nenhuma das 5 mensagens e
+    removida da fila SQS; apos o *visibility timeout*, todas as 5 (inclusive as 4 que ja tinham
+    sido processadas com sucesso!) voltam para a fila e sao reprocessadas repetidamente,
+    desperdicando invocacoes e podendo bloquear mensagens saudaveis atras de uma unica mensagem
+    defeituosa (*poison pill*).
+  - **Usando `ReportBatchItemFailures` e retornando `{"batchItemFailures": [{"itemIdentifier": msg_id}]}`:**
+    o SQS apaga imediatamente da fila todas as mensagens do lote que deram certo e **recoloca na
+    fila apenas a mensagem especifica cujo `messageId` foi listado em `batchItemFailures`**.
+
+### Pergunta 3
+**Se a coordenadora cair depois de gravar a decisao e antes de publicar o evento, esse comprovante nunca sera gerado (a recuperacao da Parte C nao republica). Isso e aceitavel? Pesquise o padrao outbox e descreva como o aplicaria aqui.**
+
+No teste da secao 10.6 item 8 (quando paramos o LocalStack, fizemos a transferencia `dff8b5b4-...`
+e religamos o LocalStack depois), observamos exatamente isso: a transferencia concluiu com
+`COMMIT`, a coordenadora registrou `NUVEM_PUBLICACAO_FALHOU`, e quando o LocalStack voltou **o
+comprovante daquela transferencia nao existia** (porque a publicacao "melhor esforco" em
+memoria na thread não é reexecutada). Da mesma forma, no Cenario 4 da Parte D
+(`coordenador-apos-decidir`), a coordenadora cai na linha anterior a `eventos_nuvem.publicar_decisao(coord)`,
+entao na recuperacao a Fase 2 e reentregue aos participantes, mas o evento SNS nunca e enviado.
+
+Para um banco real, perder comprovantes/eventos de auditoria de transferencias que comitaram
+**nao e aceitavel**. A solucao classica de arquitetura e o **Transactional Outbox Pattern**:
+  1. **Gravacao atomica junto com a decisao:** no momento em que o coordenador decide `COMMIT`
+     ou `ABORT` e chama `estado.salvar()`, ele inclui o evento pendente de nuvem dentro do
+     **mesmo arquivo/transacao duravel** (por exemplo, um campo `"nuvemPublicada": False` dentro
+     de `estado.coordenacoes[txId]`, ou uma lista `estado.outbox = [...]` gravada no mesmo
+     `os.replace` atomico de `estado-agencia-{id}.json`).
+  2. **Publicador assincrono com retentativa (*Outbox Relay*):** uma tarefa periodica (como a
+     `reentregar_pendentes()` que ja temos a cada 3s) varre todas as coordenacoes com
+     `estado in ("DECIDIDA", "CONCLUIDA")` e `nuvemPublicada == False`, tenta publicar no topico
+     SNS e so marca `nuvemPublicada = True` + `estado.salvar()` **depois** que o `sns.publish`
+     confirmar HTTP 200.
+  3. **Idempotencia na ponta consumidora:** como o *Outbox Relay* pode publicar duas vezes se
+     cair logo apos o `sns.publish` e antes de salvar `nuvemPublicada = True`, a Lambda
+     `gerar-comprovante` absorve a duplicata sem efeito colateral gracas ao
+     `ConditionExpression="attribute_not_exists(txId)"` que ja implementamos.
+
+### Pergunta 4
+**Compare, para o ICEIBank, rodar a coordenacao em containers e rodar o comprovante em serverless. O que cada modelo facilita ou dificulta (escala, custo, estado, latencia de partida)? Por que o 2PC seria uma ma ideia dentro de uma funcao serverless?**
+
+| Dimensao | Agencias / Coordenacao 2PC em Containers (CaaS) | Emissao e Consulta de Comprovantes em Serverless (FaaS / Lambda) |
+|---|---|---|
+| **Estado e Persistencia** | **Facilita:** processo de longa duracao com volume local (`/dados`) anexado, locks em memoria (`RLock`), relogio vetorial em RAM e threads periodicas de heartbeat/reentrega. | **Dificulta:** funcoes sao *stateless* e efemeras; qualquer estado exige chamadas de rede para servicos externos (S3, DynamoDB). |
+| **Latencia de Partida** | **Zero *cold start* por requisicao:** o Uvicorn ja esta de pe ouvindo na porta `4046..4048`, respondendo votos do 2PC em poucos milissegundos. | **Sofre de *cold start*:** como vimos na primeira execucao da Lambda no LocalStack (~8-10s para subir o container do runtime Python), a partida a frio adiciona latencia. |
+| **Escala e Custo** | **Custo continuo:** os 3 containers precisam ficar ligados 24/7 por causa do heartbeat do Bully e da coordenacao, mesmo sem clientes transferindo. | **Escala a zero (*pay-per-use*):** so roda e so cobra nos milissegundos em que uma transferencia termina (via SQS) ou alguem consulta um comprovante (via API Gateway). |
+
+**Por que rodar o protocolo 2PC (coordenador e participantes) dentro de funcoes serverless (Lambda) seria uma ma ideia:**
+  1. **Ausencia de identidade fixa e enderecamento direto entre pares:** o Bully e o 2PC exigem
+     $N$ nos com IDs fixos (`0, 1, 2`) que se conhecem, mantêm heartbeat continuo e fazem
+     chamadas diretas aos pares específicos; instâncias Lambda sao anonimas, criadas e destruidas
+     sob demanda pelo provedor.
+  2. ***Cold start* vs. Timeouts curtos de votacao e bloqueio de recursos:** o 2PC mantem fundos
+     reservados (`conta["reservado"]`) e locks enquanto aguarda votos com timeout de 2s. Um
+     *cold start* de Lambda na Fase 1 estouraria o timeout de voto, abortando transferencias
+     validas; e esperar timers de reentrega/resolucao dentro de uma Lambda cobraria tempo de
+     execucao ocioso (anti-padrao de FaaS).
+  3. **Recuperacao pos-queda (`recuperar()` e `resolver_em_duvida()`):** no 2PC, o processo que
+     caiu precisa **voltar ao ar sozinho** (`restart: on-failure`) e varrer seu disco local para
+     destravar transacoes em duvida. Uma funcao Lambda nao "volta ao ar sozinha" nem tem disco
+     persistente proprio entre invocacoes se nenhum evento externo a invocar.
+
+### Pergunta 5
+**O LocalStack e um emulador. Cite um aspecto em que a AWS real pode se comportar de forma diferente e que voce so descobriria ao implantar de verdade (pense em permissoes, limites, latencia e custos).**
+
+Tres diferencas criticas que so aparecem na AWS real:
+  1. **Rigidez do IAM (Permissoes de menor privilegio):** no `init.sh` do LocalStack, criamos a
+     `lambda-role` apenas com a *trust policy* `sts:AssumeRole` e **sem anexar nenhuma *permission
+     policy* de `s3:PutObject`, `s3:GetObject`, `dynamodb:PutItem`, `dynamodb:GetItem` ou
+     `sqs:ReceiveMessage`**, e o LocalStack permitiu tudo por padrao. Na AWS real, a Lambda
+     falharia imediatamente com `AccessDeniedException` ate anexarmos politicas IAM explicitas
+     para o ARN do bucket S3, da tabela DynamoDB, da fila SQS e do CloudWatch Logs.
+  2. **Rede e VPC entre Containers e Servicos AWS:** no Docker Compose, as agencias e o
+     LocalStack estao na mesma bridge Docker (`http://localstack:4566`). Na AWS real, containers
+     em subnets privadas (ECS/EKS) precisariam de **NAT Gateway** ou **VPC Endpoints
+     (PrivateLink)** para alcancar o SNS, alem de Security Groups e rotas configuradas.
+  3. **Nomes globais do S3, propagacao eventual e custos:** na AWS real, o nome do bucket
+     `iceibank-comprovantes` precisa ser **globalmente unico em toda a AWS** (provavelmente ja
+     existiria e falharia com `BucketAlreadyExists`), mudancas de IAM/API Gateway levam segundos
+     para propagar, e loops de reentrega mal configurados sem *Dead-Letter Queue (DLQ)* geram
+     cobranca real de invocacoes Lambda e requisicoes SQS/DynamoDB.
+
+---
+
+## Declaracao de Uso Responsavel de IA (Nota de Transparencia)
+
+Em conformidade com a Nota de Transparencia do roteiro da disciplina, declaro que ferramentas de
+Inteligencia Artificial (assistente de codigo no ambiente Antigravity / Claude) foram utilizadas
+como apoio para traducao da referencia Node.js/Express do roteiro para Python/FastAPI, revisao
+de concorrencia (`threading.RLock` e `asyncio`), estruturacao da interface mobile em Flutter e
+organizacao da documentacao. Todos os modulos, containers Docker, cenarios de injecao de falhas
+do 2PC e recursos serverless no LocalStack foram executados, testados localmente e validados por
+mim, estando apto a explicar e defender integralmente o funcionamento de cada trecho entregue.
