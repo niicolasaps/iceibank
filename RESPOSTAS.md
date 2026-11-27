@@ -706,3 +706,578 @@ mudar o valor exige reiniciar a agencia.
 **Evidencia:** evidencias/sprint3/funcionalidade-adicional.png
 
 ---
+
+# RESPOSTAS Sprint 4 - ICEIBank
+
+## Secao 5.10 - Perguntas sobre Persistencia Atomica, Containers e Rotas Internas
+
+### Pergunta 1
+**Por que o arquivo e gravado em um temporario e depois renomeado, em vez de sobrescrever o arquivo definitivo diretamente? O que poderia ficar no disco se a agencia caisse no meio de uma escrita direta?**
+
+Sobrescrever `estado-agencia-0.json` diretamente com `open(..., "w")` nao e uma operacao
+atomica: o sistema operacional primeiro **trunca o arquivo existente para 0 bytes** e depois
+vai copiando os blocos do buffer para o disco aos poucos. Se o processo da agencia cair (por
+`os._exit(1)`, falta de energia ou kill do container) no meio dessa gravacao, o arquivo no
+disco fica **vazio ou cortado pela metade** (JSON invalido/corrompido). Ao reiniciar, o
+`json.load()` falharia com `JSONDecodeError` e a agencia perderia tanto a versao nova quanto
+a versao anterior de todas as contas, reservas e transacoes 2PC.
+
+No `EstadoDuravel.salvar()` (`agencia/src/services/armazenamento.py`), fazemos em tres passos:
+  1. Escrevemos o JSON inteiro em `estado-agencia-0.json.tmp` (enquanto isso, o arquivo
+     definitivo `estado-agencia-0.json` continua intacto no disco);
+  2. Chamamos `f.flush()` e `os.fsync(f.fileno())`, obrigando o kernel e o controlador de disco
+     a persistirem fisicamente todos os bytes do `.tmp` antes de prosseguir;
+  3. Chamamos `os.replace(temporario, self.caminho)`: no mesmo filesystem (volume `/dados`), o
+     `rename/replace` e uma **operacao atomica de metadados do diretorio** (troca o ponteiro de
+     inode de uma so vez).
+
+Assim, se a agencia cair antes do `os.replace`, o arquivo definitivo ainda tem o estado antigo
+100% integro; se cair depois, ja tem o estado novo 100% integro — nunca um arquivo pela metade.
+
+### Pergunta 2
+**Se voce removesse o volume do docker-compose.yml e recriasse os containers (`docker compose down` seguido de `up`), o que aconteceria com as contas? E se, no meio de uma transacao 2PC, um participante perdesse o disco dessa forma: o que ele "esqueceria" e que problema isso causaria ao protocolo?**
+
+Sem o volume nomeado (`dados-0:/dados`), os arquivos `.json` e `.jsonl` seriam gravados na
+camada gravavel efemera (*writable layer*) do proprio container. Um `docker compose restart`
+ate preservaria essa camada, mas um `docker compose down` destroi o container e sua camada
+efemera; no proximo `docker compose up`, um container novo e limpo seria criado do zero e
+**todas as contas, saldos, reservas e transacoes desapareceriam**.
+
+Se um **participante do 2PC** perdesse o disco dessa forma logo apos ter votado `SIM` na Fase 1:
+  - Ele **"esqueceria" a promessa feita ao coordenador** (o registro `PREPARADO` em
+    `estado.participacoes` e o valor travado em `conta["reservado"]`, alem do proprio saldo).
+  - **Problema causado ao protocolo:** o coordenador, tendo recebido `SIM` de todos, decidiria
+    `COMMIT` e enviaria `POST /2pc/decidir` com `decisao: "COMMIT"`. Ao chegar no participante
+    que perdeu o disco, `minhas` estaria vazio e `participante.decidir()` devolveria **HTTP 409**
+    (`{"erro": "Transação desconhecida por este participante."}`). O outro participante ja teria
+    aplicado o `COMMIT` (ex.: debitado ou creditado), enquanto este jamais conseguiria aplicar —
+    **quebrando a atomicidade do 2PC** (uma metade da transferencia foi efetivada e a outra nao).
+
+### Pergunta 3
+**O relogio vetorial (Sprint 2) nao foi persistido: ao reiniciar, a agencia volta a contar de `[0,0,0]`. Isso pode violar a causalidade registrada nos logs? Descreva um cenario concreto e proponha uma correcao simples.**
+
+Sim, reiniciar o vetor em `[0, 0, 0]` enquanto o arquivo de log `.jsonl` no volume `/dados`
+continua acumulando eventos **viola a propriedade fundamental do relogio vetorial** (que exige
+contadores monotonicamente crescentes por processo).
+
+**Cenario concreto:**
+  1. A Agencia 0 processa varios eventos ate atingir o vetor `[10, 4, 8]` e envia uma mensagem
+     para a Agencia 1 com `vetorEnvio = [10, 4, 8]`. A Agencia 1 registra um evento `B` com
+     vetor `[10, 5, 8]`.
+  2. A Agencia 0 reinicia (`docker compose restart agencia-0`). Suas contas sobreviveram no
+     volume, mas seu `RelogioVetorial` na RAM volta para `[0, 0, 0]`.
+  3. Um cliente faz um novo deposito `C` na Agencia 0 (que aconteceu no mundo real **depois** de
+     tudo acima). A Agencia 0 registra `C` no `.jsonl` com `timestampVetorial = [1, 0, 0]`.
+  4. Resultado: ao analisar os logs ou comparar vetores, `[1, 0, 0] < [10, 5, 8]` em todas as
+     posicoes — fazendo parecer que o evento `C` (novo) aconteceu **causalmente ANTES** de
+     eventos antigos, ou gerando comparacoes falsas no `/sincronizar` do app mobile.
+
+**Correcao simples (duas opcoes complementares):**
+  - **Opcao 1 (no `EstadoDuravel`):** incluir o campo `"vetor": self.relogio.obter_vetor_atual()`
+    dentro do `estado-agencia-{id}.json` a cada `estado.salvar()` e restaurar `relogio.vetor` no
+    `carregar()` ao subir.
+  - **Opcao 2 (lendo o `.jsonl` no startup):** ao inicializar `RelogioVetorial`, ler a ultima
+    linha de `/dados/eventos-agencia-{id}.jsonl`, pegar o `timestampVetorial` do ultimo evento
+    gravado antes da queda e inicializar `self.vetor` a partir dele.
+
+### Pergunta 4
+**O token interno e um segredo compartilhado: qualquer agencia (ou quem o descobrir) pode chamar qualquer rota interna de qualquer outra. Quais sao os limites dessa protecao? O que seria mais robusto (ex.: TLS mutuo, rede privada)?**
+
+Limites do segredo simetrico compartilhado (`x-token-interno`):
+  1. **Ausencia de identidade individual por agencia (nao-repudio / menor privilegio):** todas
+     as 3 agencias usam exatamente a mesma string `TOKEN_INTERNO`. A Agencia 0 nao consegue
+     verificar criptograficamente se quem chamou `/2pc/decidir` foi realmente a coordenadora
+     Agencia 2 ou se foi a Agencia 1 se passando por ela.
+  2. **Raio de explosao total em caso de vazamento:** se o segredo vazar de um unico container
+     ou arquivo `.env`, o atacante ganha acesso irrestrito a todas as rotas internas (`/2pc/*` e
+     `/bully/*`) de todas as agencias ao mesmo tempo, e rotacionar o segredo exige reconfigurar
+     todo o cluster simultaneamente.
+  3. **Trafego em texto claro (HTTP sem TLS):** como as chamadas internas trafegam em HTTP puro,
+     qualquer interceptador na rede (*man-in-the-middle*) pode capturar o cabecalho
+     `x-token-interno` e reproduzir requisicoes (*replay attack*).
+
+**O que seria mais robusto em producao:**
+  - **Isolamento em rede privada Docker/VPC:** expor para o host/internet apenas um API Gateway
+    com as rotas publicas (`/auth/*`, `/contas/*`, `/transferencias`, `/bully/lider`), mantendo
+    as rotas `/2pc/*` e `/bully/eleicao` acessiveis somente na bridge interna entre containers
+    (ou em uma porta interna nao publicada no `ports:` do compose).
+  - **mTLS (Mutual TLS):** cada agencia possui seu proprio certificado X.509 (`agencia-0.crt`,
+    `agencia-1.crt`, `agencia-2.crt`) assinado por uma CA interna; o canal e criptografado e o
+    servidor valida a identidade exata de qual agencia esta chamando.
+  - **JWT assinado com chave assimetrica (RS256/Ed25519) por agencia:** cada agencia assina
+    suas chamadas internas com sua chave privada (`iss: "agencia-2"`, `exp` curto + `jti`
+    anti-replay) e as demais validam com a chave publica correspondente.
+
+---
+
+## Secao 6.6 - Perguntas sobre o Participante do 2PC
+
+### Pergunta 1
+**Por que o participante grava a promessa em disco antes de responder SIM? Descreva o que poderia dar errado se gravasse depois.**
+
+No 2PC, responder `voto: "SIM"` na Fase 1 significa abrir mao da autonomia local: o participante
+promete ao coordenador que a operacao ja foi validada, os recursos foram reservados e que ele
+**garante** conseguir aplicar `COMMIT` ou `ABORT` quando a Fase 2 chegar, mesmo que caia e
+reinicie no meio do caminho.
+
+Se o participante enviasse o HTTP 200 `{voto: "SIM"}` pela rede **antes** de chamar
+`estado.salvar()` e caisse exatamente entre o envio da resposta e a gravacao em disco:
+  1. O coordenador receberia o `SIM` normalmente, juntaria com o `SIM` do outro participante e
+     decidiria **`COMMIT`**.
+  2. Enquanto o participante estava reiniciando (ou logo ao voltar), como o `estado.salvar()`
+     nao havia rodado, a conta voltaria do disco com **`reservado = 0`** e sem nenhum registro
+     em `estado.participacoes`.
+  3. Um saque concorrente de um cliente naquela conta veria `saldo_disponivel` cheio e
+     **gastaria o dinheiro** que deveria estar reservado para o 2PC (ou o proprio `decidir` do
+     coordenador falharia com 409 *"Transação desconhecida por este participante"*).
+
+Por isso o `estado.salvar()` (com `fsync` + `os.replace`) acontece obrigatoriamente **antes** do
+`return {"voto": "SIM"}` (e o ponto de falha `falhar("participante-apos-votar")` fica justamente
+entre o `salvar()` e o `return` para provar que a promessa ja esta segura no disco).
+
+### Pergunta 2
+**O que significa a operacao ser idempotente aqui? Por que a rede torna isso obrigatorio, e nao opcional?**
+
+Uma operacao e **idempotente** quando aplica-la 1 vez, 2 vezes ou $N$ vezes com os mesmos
+parametros produz exatamente o mesmo estado final no sistema e devolve uma resposta coerente,
+sem duplicar efeitos colaterais (nao reserva duas vezes nem debita/credita duas vezes).
+
+No nosso `participante.py`, tanto `preparar` quanto `decidir` sao idempotentes:
+  - Em `preparar`: se `estado.participacoes.get(f"{tx_id}:{tipo}")` ja existe, ele nao soma
+    `valor` em `conta["reservado"]` novamente — apenas devolve o voto ja registrado (`SIM` ou
+    `NAO`).
+  - Em `decidir`: no laco sobre `minhas`, a linha `if p["estado"] != "PREPARADO": continue`
+    garante que, se a participacao ja passou para `COMMITADO` ou `ABORTADO` na primeira chamada,
+    chamadas repetidas ignoram a movimentacao de saldo e respondem `{"ok": True}` (como vimos no
+    teste da secao 6.5 ao enviar `COMMIT` duas vezes seguidas para `teste-1`, mantendo o saldo
+    em `1900.0`).
+
+**Por que a rede torna isso obrigatorio:** em sistemas distribuidos sobre rede IP/HTTP, uma
+falha de comunicacao e ambigua — quando o coordenador envia `POST /2pc/decidir` e sofre timeout
+(ou queda de conexao), ele **nao tem como saber** se o pacote se perdeu na ida (antes de o
+participante aplicar) ou se o participante aplicou o débito, salvou em disco e caiu/perdeu a
+conexao na volta da resposta HTTP. Como a unica forma de garantir entrega e a **reentrega
+periodica (`reentregar_pendentes`)**, o protocolo *at-least-once* inevitavelmente entregara a
+mesma decisao mais de uma vez em cenarios de falha, tornando a idempotencia obrigatoria.
+
+### Pergunta 3
+**Por que o participante, depois de votar SIM, nao pode decidir sozinho abortar (por exemplo, por timeout), mesmo que o coordenador esteja demorando?**
+
+Porque, a partir do momento em que o participante enviou `SIM`, ele entrou na **janela de
+incerteza (em duvida / `PREPARADO`)**: ele nao sabe o que aconteceu do outro lado da rede.
+Existem dois mundos possiveis e indistinguiveis do ponto de vista local daquele participante:
+  - **Mundo A:** o coordenador caiu antes de decidir (ou o outro participante votou `NAO`), e a
+    decisao final sera `ABORT`.
+  - **Mundo B:** o outro participante tambem votou `SIM`, o coordenador **ja decidiu `COMMIT`**,
+    ja gravou `COMMIT` em disco e **ja entregou `COMMIT` para o outro participante** (que ja
+    creditou o dinheiro na conta de destino!), tendo caido logo antes de enviar a mensagem para
+    este participante.
+
+Se o participante em duvida abortasse unilateralmente por timeout e liberasse a reserva no
+Mundo B, a conta de destino teria recebido o credito e a conta de origem nao seria debitada —
+criando dinheiro do nada e destruindo a consistencia global. Por isso o 2PC e um **protocolo
+bloqueante**: apos votar `SIM`, o participante e obrigado a manter `estado = 'PREPARADO'` e o
+saldo reservado indefinidamente, rodando `resolver_em_duvida()` (`GET /2pc/status/{txId}`) ate o
+coordenador responder.
+
+### Pergunta 4
+**Por que o debito reserva o valor na fase 1 em vez de simplesmente debitar? O que poderia acontecer com duas transferencias simultaneas da mesma conta sem a reserva?**
+
+**1. Por que reservar na Fase 1 em vez de debitar direto:**
+Na Fase 1 a transacao ainda **nao foi confirmada** (o participante de credito pode votar `NAO`
+porque a conta de destino nao existe, como no teste `idDestino = 99`, ou o coordenador pode
+abortar por timeout). Se a Fase 1 ja subtraisse `conta["saldo"]`:
+  - Leituras de `GET /contas/{id}` mostrariam um saldo menor que o real para uma transacao que
+    ainda nem comitou (*dirty read* / leitura suja);
+  - Um `ABORT` exigiria re-somar dinheiro ao saldo (compensacao), dificultando distinguir o que
+    e dinheiro efetivamente na conta do que esta apenas bloqueado aguardando confirmacao.
+Separar `saldo` (dinheiro real na conta), `reservado` (comprometido em 2PC em aberto) e
+`disponivel = saldo - reservado` torna o estado transparente e o `ABORT` trivial (`reservado -= valor`).
+
+**2. O que aconteceria com duas transferencias simultaneas sem a reserva (*double spending*):**
+Suponha que a Conta 0 tenha `saldo = R$ 100,00` e o cliente dispare duas transferencias de
+`R$ 80,00` quase ao mesmo tempo (`T1` e `T2`):
+  - **Sem reserva na Fase 1:** o `preparar` de `T1` olha `saldo (100) >= 80` e vota `SIM`. Antes
+    que a Fase 2 de `T1` chegue, o `preparar` de `T2` tambem olha `saldo (100) >= 80` e tambem
+    vota `SIM`! Ambas recebem `COMMIT` na Fase 2 e debitam `80 + 80 = 160`, deixando a conta
+    com **saldo negativo (`-R$ 60,00`)** — gasto duplo.
+  - **Com a reserva + `estado.lock`:** o `preparar` de `T1` reserva `80` (`saldo = 100`,
+    `reservado = 80`, `disponivel = 20`). Quando o `preparar` de `T2` chega milissegundos
+    depois, ele verifica `saldo_disponivel(conta) (20) < 80`, vota **`NAO ("Saldo insuficiente.")`**
+    e `T2` e abortada com seguranca.
+
+---
+
+## Secao 7.4 - Perguntas sobre o Coordenador, Recuperacao e Transferencia via 2PC
+
+### Pergunta 1
+**O coordenador grava a decisao em disco antes de comunica-la aos participantes. Por que? O que poderia acontecer se a ordem fosse inversa e ele caisse entre as duas etapas?**
+
+No `coordenador.py`, a linha `self.estado.salvar()` logo apos definir `coord["decisao"] = "COMMIT" | "ABORT"`
+e `coord["estado"] = "DECIDIDA"` e o **ponto de efetivacao (*commit point* / ponto sem volta)**
+de toda a transacao distribuida:
+  - Antes desse `salvar()`, a transacao esta em `PREPARANDO` e ainda pode (e deve) ser abortada
+    se o coordenador cair.
+  - Depois desse `salvar()`, a decisao e **imutavel e eterna**: mesmo que o coordenador caia no
+    milissegundo seguinte (`falhar("coordenador-apos-decidir")`), ao voltar ele lera
+    `estado == 'DECIDIDA'` do disco e a thread `reentregar_pendentes()` (ou o endpoint
+    `/2pc/status/{txId}`) entregara exatamente a mesma decisao a todos os participantes.
+
+**Se a ordem fosse inversa** (enviar `POST /2pc/decidir` com `COMMIT` aos participantes *antes*
+de gravar a decisao em disco) e o coordenador caisse apos enviar o `COMMIT` para a Agencia 0
+mas antes de gravar no proprio disco:
+  1. A Agencia 0 ja teria recebido `COMMIT` e debitado os R$ 100 definitivamente (`COMMITADO`).
+  2. A Agencia 1 ainda estaria em `PREPARADO` (nao recebeu a mensagem).
+  3. Ao reiniciar, o coordenador leria seu disco onde a transacao ainda constava como
+     `PREPARANDO` (sem decisao gravada). O `coordenador.recuperar()` executaria o **aborto
+     presumido**, gravando `decisao = "ABORT"` e enviando `ABORT` para a Agencia 1!
+  4. Resultado catastrofico: a Agencia 0 comitou (debitou) e a Agencia 1 abortou (nao creditou)
+     — o dinheiro desapareceu, violando a propriedade central do 2PC.
+
+### Pergunta 2
+**Explique por que o aborto presumido e seguro para transacoes que ficaram na fase 1, mas nao seria seguro presumir COMMIT para elas.**
+
+Quando o coordenador reinicia e encontra no disco uma coordenacao com `estado == "PREPARANDO"`
+(ou quando um participante consulta `/2pc/status/{txId}` sobre um `txId` que nem existe no disco
+do coordenador), sabemos com **100% de certeza** que o coordenador caiu **antes** do ponto de
+decisao da Fase 1.
+
+**Por que presumir `ABORT` e totalmente seguro:**
+  1. Como o coordenador nunca chegou a gravar `DECIDIDA` (e so envia mensagens da Fase 2 *apos*
+     gravar), **nenhum participante jamais recebeu uma ordem de `COMMIT`** para essa transacao.
+  2. Na Fase 1, qualquer participante no maximo votou `NAO` (ja esta `ABORTADO`) ou votou `SIM`
+     (esta `PREPARADO` aguardando a decisao). Nenhum dos dois impede um `ABORT`: quem estava
+     `PREPARADO` apenas libera a reserva (`reservado -= valor`) e volta ao estado original.
+
+**Por que presumir `COMMIT` seria inseguro e incorreto:**
+  1. Enquanto estava em `PREPARANDO`, **algum participante pode ter votado `NAO`** (por falta de
+     saldo ou porque a conta de destino nao existia, ex.: `idDestino = 99`), ou pode nem ter
+     recebido o `/2pc/preparar` antes da queda do coordenador.
+  2. Um participante que votou `NAO` ja encerrou sua participacao como `ABORTADO` e nao reservou
+     fundos; se o coordenador presumisse `COMMIT` na recuperacao, tentaria forcar a aplicacao de
+     uma transferencia sem saldo ou para uma conta inexistente, quebrando a regra fundamental do
+     2PC de que `COMMIT` exige unanimidade de votos `SIM`.
+
+### Pergunta 3
+**A mesma agencia pode ser coordenadora e participante da mesma transacao (ex.: a lider e a agencia 2 e a conta de destino esta nela). Isso causa algum problema para o protocolo? Como o codigo lida com isso?**
+
+Do ponto de vista do protocolo 2PC, **nao causa nenhum problema**: "Coordenador" e "Participante"
+sao **papeis logicos independentes**. Quando a Agencia 2 e a lider e coordena uma transferencia
+envolvendo a Conta 2 (que pertence a `2 % 3 == 2`), ou mesmo uma transferencia local entre duas
+contas da Agencia 0 coordenada pela Agencia 2, a agencia acumula os dois papeis mantendo os
+estados completamente separados no mesmo `EstadoDuravel`:
+  - O papel de coordenador grava em `estado.coordenacoes[txId]`;
+  - O papel de participante grava em `estado.participacoes[f"{txId}:{tipo}"]` (inclusive, a
+    chave inclui `:DEBITO` ou `:CREDITO` justamente para que, quando origem e destino estao na
+    **mesma** agencia, ela possa participar duas vezes da mesma transacao sem sobrescrever a
+    propria entrada!).
+
+**Como o nosso codigo Python/FastAPI lida com isso sem travar (deadlock):**
+  1. **Chamada HTTP para si mesma sem bloquear o event loop:** o coordenador faz
+     `POST http://agencia-2:4048/2pc/preparar` (e `/2pc/decidir`) via `httpx.AsyncClient` +
+     `asyncio.gather` dentro de uma rota `async def`. Durante o `await`, o event loop do Uvicorn
+     fica livre para receber e despachar a requisicao de entrada para o handler `preparar` /
+     `decidir` no pool de threads.
+  2. **Lock liberado antes da chamada de rede:** no `coordenador.py`, o `with self.estado.lock:`
+     e usado apenas no instante de gravar `PREPARANDO` ou `DECIDIDA` e **liberado imediatamente
+     antes do `await client.post(...)`**. Se o coordenador segurasse `estado.lock` durante a
+     chamada HTTP para si mesmo, o handler `participante.preparar()` na mesma agencia ficaria
+     bloqueado esperando o mesmo `estado.lock` em outra thread, causando *deadlock* e timeout.
+
+### Pergunta 4
+**Compare com o Sprint 2 (debita e depois publica no RabbitMQ). Que garantia o 2PC da e a abordagem anterior nao dava? Que custo o 2PC introduz (latencia, disponibilidade)?**
+
+**Garantia que o 2PC da e o Sprint 2 nao dava — Atomicidade Distribuida (*All-or-Nothing*):**
+  - **No Sprint 2 (mensageria assincrona sem coordenacao):** a agencia de origem debitava o
+    saldo imediatamente e publicava uma mensagem `agencia.X.creditar` no RabbitMQ. Como vimos no
+    Sprint 2, se a conta de destino nao existisse na outra agencia (ou se a outra agencia tivesse
+    perdido o estado), o consumidor registrava `CREDITO_REMOTO_FALHOU`, mas **o dinheiro ja havia
+    saido da conta de origem e nunca era estornado** — o banco ficava permanentemente
+    inconsistente.
+  - **No Sprint 4 (Two-Phase Commit):** nenhuma conta tem o saldo alterado antes que **ambas** as
+    agencias validem a operacao, reservem os fundos e gravem o compromisso em disco na Fase 1.
+    Como comprovamos no Teste 2 (`2pc-abort.png`) ao tentar transferir R$ 50 da Conta 0 para a
+    conta inexistente `idDestino = 99`: a Agencia 0 votou `SIM` (reservando R$ 50), a validacao
+    da Conta 99 votou `NAO ("Conta não encontrada nesta agência.")`, a coordenadora decidiu
+    `ABORT` e a reserva na Conta 0 foi desfeita imediatamente, mantendo o saldo intacto em
+    `R$ 1800,00`. Ou ambas as pontas aplicam, ou nenhuma aplica.
+
+**Custos que o 2PC introduz em troca dessa garantia:**
+  1. **Maior latencia por transferencia:** no Sprint 2, a transferencia fazia 1 escrita em RAM e
+     1 publish no broker. No 2PC, cada transferencia exige encaminhamento a lider + **2 fases de
+     chamadas HTTP sincronas em rede** (`/2pc/preparar` e `/2pc/decidir` para todos os
+     participantes) + **multiplos `os.fsync` em disco** (no inicio, em cada voto `SIM`, na
+     decisao do coordenador e na aplicacao final).
+  2. **Menor disponibilidade e acoplamento temporal:** no Sprint 2, se a Agencia 1 estivesse
+     fora do ar, a Agencia 0 publicava na fila duravel do RabbitMQ e respondia 200 na hora. No
+     2PC, **todos os participantes e a coordenadora precisam estar online e respondendo dentro
+     do timeout (2s) no momento da transferencia**; se qualquer um estiver fora do ar, o voto
+     vira `NAO` por timeout e a transferencia e abortada (422) ou recusada (503).
+  3. **Risco de bloqueio (*blocking protocol*):** se o coordenador cair apos os participantes
+     votarem `SIM` e antes de divulgar a decisao, o dinheiro reservado (`conta["reservado"]`)
+     fica bloqueado e indisponivel para o cliente ate que o coordenador se recupere.
+
+---
+
+## Secao 8.6 - Registro dos 5 Cenarios de Falha do 2PC (Parte D)
+
+Em todos os 5 cenarios abaixo, verificamos o **invariante do sistema**: a soma dos saldos das
+contas (`Conta 0 + Conta 1`) nao sofreu criacao nem destruicao de dinheiro e, apos a
+convergencia/recuperacao, `reservado = 0` em todas as contas.
+
+### Cenario 1 (Secao 8.1) - Participante fora do ar na Fase 1
+- **O que foi feito:** com `Conta 0 = 1800.0` e `Conta 1 = 100.0` (soma = `1900.0`), paramos a
+  Agencia 1 (`docker compose stop agencia-1`) e enviamos `POST /transferencias` de R$ 100 da
+  Conta 0 para a Conta 1. Depois religamos a Agencia 1 (`docker compose start agencia-1`).
+- **O que era esperado:** a Agencia 0 vota `SIM` (reserva R$ 100), a chamada a Agencia 1 sofre
+  timeout de 2s (tratado como voto `NAO`), a coordenadora decide `ABORT`, libera a reserva na
+  Agencia 0 imediatamente e reentrega `ABORT` a Agencia 1 quando ela volta.
+- **O que foi observado (logs e resposta):**
+  - Resposta HTTP 422:
+    `{"txId":"bde3e886-f921-4e82-9f3f-b1669a311cd5","resultado":"ABORT","motivos":["Agência não respondeu a tempo."],"pendentesDeConfirmacao":[1]}`
+  - Apos religar a Agencia 1, a reentrega concluiu a coordenacao (`estado=CONCLUIDA decisao=ABORT`).
+- **Invariante:** respeitado (`Conta 0 = 1800.0`, `Conta 1 = 100.0`, **Soma = 1900.0**, **Reservado = 0**).
+
+### Cenario 2 (Secao 8.2) - Participante cai depois de votar SIM (`participante-apos-votar`)
+- **O que foi feito:** definimos `$env:FALHA_2PC_0 = "participante-apos-votar"`, recriamos os
+  containers e transferimos R$ 100 da Conta 0 para a Conta 1.
+- **O que era esperado:** a Agencia 0 reserva R$ 100, grava `PREPARADO` em disco e morre com
+  `os._exit(1)` antes de responder HTTP. A coordenadora sofre timeout, decide `ABORT`. O Docker
+  reinicia a Agencia 0 (`restart: on-failure`), que acorda em duvida (`PREPARADO`), consulta
+  `/2pc/status/{txId}` na coordenadora, descobre `ABORT`, registra `2PC_RESOLVIDA_POR_CONSULTA`
+  e libera os R$ 100 reservados.
+- **O que foi observado (trecho real do log da `agencia-0`):**
+  ```
+  agencia-0-1 | [Vetor [9, 8, 24]] 2PC_VOTO_SIM {'txId': '7b1a206d-b6f2-439e-8b25-0c7d9362a52f', 'operacao': {'tipo': 'DEBITO', 'idConta': 0, 'valor': 100.0}}
+  agencia-0-1 | [FALHA INJETADA] participante-apos-votar: derrubando a agência 0 agora
+  agencia-0-1 | [Vetor [1, 0, 0]] 2PC_RESOLVIDA_POR_CONSULTA {'txId': '7b1a206d-b6f2-439e-8b25-0c7d9362a52f', 'decisao': 'ABORT'}
+  agencia-0-1 | [Vetor [2, 0, 0]] 2PC_ABORT_APLICADO {'txId': '7b1a206d-b6f2-439e-8b25-0c7d9362a52f', 'tipo': 'DEBITO', 'valor': 100.0}
+  ```
+- **Invariante:** respeitado (`Conta 0 = 1800.0`, `Conta 1 = 100.0`, **Soma = 1900.0**, **Reservado = 0**).
+  Evidencia: `evidencias/sprint4/falha-participante.png`.
+
+### Cenario 3 (Secao 8.3) - Coordenador cai antes de decidir (`coordenador-antes-de-decidir`)
+- **O que foi feito:** definimos `$env:FALHA_2PC_2 = "coordenador-antes-de-decidir"` na lider
+  Agencia 2 e transferimos R$ 100 da Conta 0 para a Conta 1.
+- **O que era esperado:** os participantes votam `SIM` e reservam R$ 100; a Agencia 2 cai antes
+  de gravar a decisao (cliente recebe HTTP 503). Ao reiniciar pelo Docker, a Agencia 2 executa
+  `coordenador.recuperar()` antes de aceitar requisicoes, registra `2PC_ABORTO_PRESUMIDO` e
+  comunica `ABORT` aos participantes, que liberam a reserva.
+- **O que foi observado (trecho real dos logs da `agencia-2` e `agencia-0`):**
+  ```
+  agencia-2-1 | [Vetor [4, 9, 23]] 2PC_INICIO {'txId': '6a768db6-5d38-45e1-bfed-01dcd5123924', 'idOrigem': 0, 'idDestino': 1, 'valor': 100.0}
+  agencia-2-1 | [FALHA INJETADA] coordenador-antes-de-decidir: derrubando a agência 2 agora
+  agencia-2-1 | [Vetor [0, 0, 1]] 2PC_ABORTO_PRESUMIDO {'txId': '6a768db6-5d38-45e1-bfed-01dcd5123924'}
+  agencia-2-1 | [Vetor [16, 19, 28]] 2PC_CONCLUIDA {'txId': '6a768db6-5d38-45e1-bfed-01dcd5123924', 'decisao': 'ABORT'}
+  agencia-0-1 | [Vetor [11, 9, 24]] 2PC_RESOLVIDA_POR_CONSULTA {'txId': '6a768db6-5d38-45e1-bfed-01dcd5123924', 'decisao': 'ABORT'}
+  agencia-0-1 | [Vetor [12, 9, 24]] 2PC_ABORT_APLICADO {'txId': '6a768db6-5d38-45e1-bfed-01dcd5123924', 'tipo': 'DEBITO', 'valor': 100.0}
+  ```
+- **Invariante:** respeitado (`Conta 0 = 1800.0`, `Conta 1 = 100.0`, **Soma = 1900.0**, **Reservado = 0**).
+  Evidencia: `evidencias/sprint4/falha-coordenador.png`.
+
+### Cenario 4 (Secao 8.4) - Coordenador cai depois de decidir COMMIT (`coordenador-apos-decidir`)
+- **O que foi feito:** definimos `$env:FALHA_2PC_2 = "coordenador-apos-decidir"` na lider
+  Agencia 2 e transferimos R$ 100 da Conta 0 para a Conta 1.
+- **O que era esperado:** ambos votam `SIM`; a coordenadora grava `COMMIT` (`estado = 'DECIDIDA'`)
+  em disco e cai imediatamente antes da Fase 2. O cliente recebe HTTP 503, mas, ao reiniciar, a
+  coordenadora ve `DECIDIDA = COMMIT` no disco, reentrega o `COMMIT` e a transferencia se
+  completa.
+- **O que foi observado (trecho real do log da `agencia-2`):**
+  ```
+  agencia-2-1 | [Vetor [9, 12, 24]] 2PC_DECISAO_COMMIT {'txId': '72245233-a5f3-40a3-a36b-e4cf42e9f1b1'}
+  agencia-2-1 | [FALHA INJETADA] coordenador-apos-decidir: derrubando a agência 2 agora
+  agencia-2-1 | [Vetor [0, 0, 5]] 2PC_DECISAO_ENVIADA {'txId': '72245233-a5f3-40a3-a36b-e4cf42e9f1b1', 'para': 0, 'decisao': 'COMMIT'}
+  agencia-2-1 | [Vetor [15, 8, 22]] 2PC_DECISAO_ENVIADA {'txId': '72245233-a5f3-40a3-a36b-e4cf42e9f1b1', 'para': 1, 'decisao': 'COMMIT'}
+  agencia-2-1 | [Vetor [15, 18, 24]] 2PC_CONCLUIDA {'txId': '72245233-a5f3-40a3-a36b-e4cf42e9f1b1', 'decisao': 'COMMIT'}
+  ```
+  O cliente recebeu HTTP 503, mas a transferencia completou sozinha: `Conta 0` passou de
+  `1800.0` para `1700.0` e `Conta 1` passou de `100.0` para `200.0`.
+- **Invariante:** respeitado (`Conta 0 = 1700.0`, `Conta 1 = 200.0`, **Soma = 1900.0**, **Reservado = 0**).
+
+### Cenario 5 (Secao 8.5) - O Bloqueio do 2PC
+- **O que foi feito:** com `FALHA_2PC_2 = "coordenador-antes-de-decidir"` e a coordenadora
+  Agencia 2 mantida parada apos a queda, transferimos da Conta 0 para a Conta 1.
+- **O que era esperado:** os participantes votam `SIM`, reservam o valor na Conta 0 e ficam
+  bloqueados em `estado = PREPARADO` registrando `2PC_BLOQUEADA_AGUARDANDO_COORDENADOR`. Um
+  saque que dependa do valor reservado e recusado com HTTP 422 (`Saldo insuficiente.`). Ao
+  religar a Agencia 2, ela executa `2PC_ABORTO_PRESUMIDO` e desbloqueia a reserva.
+- **O que foi observado:**
+  - Durante o bloqueio: `reservado > 0`, `disponivel = 200.0 < saldo`, tentativa de saque de
+    R$ 500 recusada com **HTTP 422** (`{"detail":"Saldo insuficiente."}`), log
+    `2PC_BLOQUEADA_AGUARDANDO_COORDENADOR` na Agencia 0 e `transacoes.py` exibindo os
+    participantes em `estado=PREPARADO` com a Agencia 2 `fora do ar`.
+  - Apos religar a Agencia 2: o bloqueio terminou automaticamente com `2PC_ABORTO_PRESUMIDO` e
+    `reservado` voltou a `0`.
+- **Invariante:** respeitado (nenhum dinheiro criado ou destruido; reserva liberada apos a volta
+  da coordenadora). Evidencias: `evidencias/sprint4/bloqueio.png` e
+  `evidencias/sprint4/transacoes-js.png`.
+
+---
+
+## Secao 8.7 - Perguntas sobre os Testes de Falha (Parte D)
+
+### Pergunta 1
+**No cenario 2, o coordenador decidiu ABORT por timeout, mas o participante tinha votado SIM em disco. Por que isso nao gera inconsistencia? Quem "vence" e como o participante fica sabendo?**
+
+Nao gera inconsistencia porque **vota `SIM` nao e uma decisao final — e apenas uma promessa
+condicional** de que o participante *pode* tanto comitar quanto abortar, dependendo do que o
+coordenador decidir. No 2PC, **quem sempre "vence" e a decisao unilateral do coordenador**:
+para decidir `COMMIT` o coordenador precisa receber `SIM` de todos; como a resposta da Agencia 0
+nao chegou (ela caiu apos `estado.salvar()`), o coordenador tratou o timeout como voto `NAO` e
+gravou `DECIDIDA = ABORT`.
+
+Enquanto estava em `PREPARADO`, a Agencia 0 apenas **reservou** os R$ 100 (`reservado += 100`),
+sem alterar `saldo`. Quando o Docker reiniciou a Agencia 0, a thread `resolver_em_duvida()`
+viu a participacao em `PREPARADO` e consultou `GET /2pc/status/{txId}` na coordenadora Agencia 2.
+A Agencia 2 respondeu `{"decisao": "ABORT"}`, e a Agencia 0 registrou
+`2PC_RESOLVIDA_POR_CONSULTA` seguido de `2PC_ABORT_APLICADO`, subtraindo os R$ 100 de `reservado`
+e alinhando seu estado local com a decisao do coordenador.
+
+### Pergunta 2
+**No cenario 5, o dinheiro fica preso enquanto o coordenador esta fora. Isso e uma falha de seguranca (safety) ou de disponibilidade (liveness) do protocolo? Justifique.**
+
+E uma falha de **disponibilidade / progresso (*liveness*)**, justamente para **preservar a
+seguranca (*safety*)** a qualquer custo.
+  - ***Safety* ("nada de ruim acontece"):** o invariante de atomicidade e conservacao de
+    dinheiro nunca e violado — o dinheiro reservado nao pode ser gasto duas vezes (o saque de
+    R$ 500 foi recusado com HTTP 422) nem desaparece.
+  - ***Liveness* ("algo de bom eventualmente acontece"):** a transacao e os R$ 1000 reservados
+    nao conseguem progredir (nem para `COMMIT` nem para `ABORT`) enquanto o processo coordenador
+    da Agencia 2 estiver desligado.
+
+O 2PC faz uma escolha explicita no espectro *Safety vs. Liveness*: como o participante que votou
+`SIM` nao sabe se o coordenador chegou a decidir `COMMIT` antes de cair, a unica maneira de
+garantir *safety* sem consenso replicado e **bloquear (*sacrificar liveness*)** ate o
+coordenador voltar.
+
+### Pergunta 3
+**No cenario 4, o cliente recebeu um erro, mas a transferencia se completou depois. Isso e aceitavel para um banco? O que a API poderia oferecer para que o cliente descubra o resultado real? (Dica: na Parte F voce cria justamente um comprovante consultavel por txId.)**
+
+Devolver um erro generico HTTP 503 sem identificador quando a operacao na verdade sera efetivada
+em background e **muito problematico para a experiencia bancaria**: o cliente (ou o app mobile),
+achando que a transferencia falhou ("Nada foi aplicado; tente novamente"), pode clicar em
+*Transferir* de novo e **duplicar a transferencia**.
+
+O que a API bancária deveria oferecer para resolver isso:
+  1. **Gerar ou aceitar um `txId` (chave de idempotencia) logo na entrada e devolve-lo mesmo em
+     respostas 202/503:** assim o cliente sabe qual `txId` ficou "em processamento".
+  2. **Endpoint de consulta de status/comprovante por `txId`:** como o `GET /2pc/status/{txId}`
+     (interno) ou, para o cliente final, a API serverless de **consulta de comprovante por
+     `txId`** implementada na **Parte F** (que consulta o DynamoDB/S3 e informa se aquela
+     transacao especifica terminou em `COMMIT` ou `ABORT`).
+
+### Pergunta 4
+**Se a lider cair e o Bully eleger outra agencia, quem resolve as transacoes em andamento da lider antiga? O codigo deste roteiro cobre esse caso? Explique o que acontece e o que faltaria.**
+
+No codigo deste roteiro, **apenas a coordenadora original (a lider antiga, quando voltar ao ar)
+pode resolver as transacoes que ela mesma iniciou** — a nova lider eleita pelo Bully **nao**
+assume as transacoes em andamento da lider antiga!
+
+**Por que isso acontece no codigo:**
+  1. Quando um participante vota `SIM` em `participante.preparar()`, ele grava no seu disco
+     `"coordenador": coordenador` (o ID fixo da agencia que iniciou aquela transacao, ex.: `2`).
+  2. Na funcao `resolver_em_duvida()`, o participante consulta sempre
+     `GET {url_de(p.coordenador)}/2pc/status/{p.txId}` (ou seja, pergunta especificamente para a
+     **Agencia 2**, e nao para `bully.obter_lider_atual()`).
+  3. Mesmo que o participante perguntasse para a nova lider (Agencia 1), o registro daquela
+     coordenacao (`estado.coordenacoes[txId]`) esta gravado apenas no volume local `/dados` da
+     **Agencia 2**. Se a Agencia 1 fosse consultada, ela nao teria o `txId` em
+     `estado.coordenacoes` e seu `status_de(txId)` responderia **aborto presumido (`ABORT`)** —
+     o que seria um **bug catastrofico** caso a Agencia 2 ja tivesse decidido `COMMIT` antes de
+     cair!
+
+**O que faltaria para a nova lider assumir as transacoes da antiga sem esperar ela voltar:**
+  - **Estado de coordenacao replicado por consenso (Paxos/Raft)** entre as agencias, para que a
+    nova lider enxergasse exatamente se a antiga gravou `PREPARANDO` ou `DECIDIDA = COMMIT`; ou
+  - Um **protocolo de terminacao cooperativa (como no 3PC)** em que a nova lider consulta todos
+    os participantes para descobrir se algum ja recebeu `COMMIT` ou se todos ainda estao em
+    `PREPARADO`, usando numeros de epoca (*epochs/terms*) para impedir que a lider antiga tome
+    decisoes conflitantes ao voltar.
+
+---
+
+## Secao 9.3 - Perguntas sobre Observabilidade das Transacoes (`transacoes.py`)
+
+### Pergunta 1
+**O estado das transacoes so cresce: nada e removido. Num sistema real, isso e um problema? Que politica de limpeza (e que cuidado com o aborto presumido) voce proporia?**
+
+Sim, em um sistema real de producao isso e um problema serio: como `estado.coordenacoes` e
+`estado.participacoes` nunca removem entradas e `estado.salvar()` reescreve o arquivo JSON
+inteiro a cada mudanca, o consumo de memoria RAM, o tamanho do arquivo em disco e o tempo de
+serializacao/`fsync` cresceriam indefinidamente ($O(N)$ por operacao), degradando o throughput
+ate esgotar o disco ou a memoria.
+
+**Politica de limpeza (*garbage collection* de transacoes) e o cuidado com o aborto presumido:**
+  1. **No coordenador:** uma coordenacao so pode ser removida do mapa ativo **depois que atingir
+     `estado == "CONCLUIDA"`** (isto e, quando `all(p["confirmou"] for p in coord["participantes"])`
+     for verdadeiro — todos os participantes ja confirmaram que aplicaram o `COMMIT` ou `ABORT`
+     da Fase 2).
+  2. **Armadilha critica com o aborto presumido (`status_de`):** se o coordenador apagar um
+     `txId` que decidiu **`COMMIT`** antes que todos os participantes tenham confirmado (ou se
+     uma resposta `ok: true` da Fase 2 for processada mas um participante tardio ainda perguntar
+     `GET /2pc/status/{txId}`), o `status_de(txId)` nao encontrara o `txId` e devolvera
+     **`ABORT` ("transação desconhecida - aborto presumido")** para uma transacao que na verdade
+     havia sido **`COMMIT`**!
+     - **Por que apagar um `ABORT` concluido e imediato:** sob a regra de *Presumed Abort*,
+       "nao existir no coordenador" equivale a `ABORT`; logo, esquecer uma transacao abortada
+       nunca muda a resposta de `status_de`.
+     - **Cuidado para apagar um `COMMIT`:** o coordenador so pode remover da memoria/disco uma
+       transacao `COMMIT` quando **100% dos participantes tiverem confirmado a Fase 2** (`CONCLUIDA`)
+       e, opcionalmente, arquivar um log historico/TTL em armazenamento frio (como o DynamoDB/S3
+       da Parte F) antes de expurgar do `estado-agencia-{id}.json`.
+  3. **Nos participantes:** uma participacao em `COMMITADO` ou `ABORTADO` pode ser expurgada
+     apos um **TTL (ex.: 24h)** muito maior que a janela maxima de reentrega do coordenador (ou
+     apos confirmacao explicita de fim de protocolo na terceira mensagem *ACK*).
+
+### Pergunta 2
+**Os logs de eventos usam o relogio vetorial do Sprint 2. Em que situacao o vetor ajuda a entender uma falha do 2PC que o horario de parede nao ajudaria?**
+
+Quando as 3 agencias rodam em maquinas/VMs diferentes, seus **relogios fisicos de parede
+(`horaParede`) podem ter *clock skew* (desvio de dezenas de milissegundos ou segundos via NTP)**.
+Em uma transacao 2PC onde as fases duram apenas ~5 a 20 ms na rede local, o `horaParede` pode
+mostrar absurdos aparentes como:
+  - O participante registrando `2PC_VOTO_SIM` com `horaParede` **maior** do que o
+    `2PC_DECISAO_ABORT` do coordenador; ou
+  - Uma duvida real de auditoria na Parte D: *"no Cenario 2, o coordenador decidiu `ABORT`
+    **antes** de receber o voto do participante (por timeout), ou recebeu a mensagem do
+    participante e mesmo assim abortou?"*
+
+Com o **`timestampVetorial`**, essa ambiguidade desaparece matematicamente, sem depender de NTP:
+  - Quando o participante envia a resposta de `/2pc/preparar` (ou quando o coordenador envia
+    `/2pc/decidir`), o `vetorEnvio` viaja no JSON e o receptor faz `relogio.ao_receber(vetorEnvio)`.
+  - Olhando os vetores nos nossos logs do Cenario 2: a Agencia 0 gravou `2PC_VOTO_SIM` com vetor
+    `[9, 8, 24]` e caiu antes de responder; a coordenadora Agencia 2 gravou `2PC_DECISAO_ABORT`
+    com a posicao 0 do seu vetor **menor que 9** (ela nao absorveu o `9` da Agencia 0!). Isso
+    prova com certeza causal que a decisao da coordenadora foi tomada **sem jamais ter recebido**
+    a resposta do voto da Agencia 0.
+
+---
+
+## Funcionalidade Adicional Sprint 4 - Endpoint de Saude (`GET /saude`) com Healthcheck no Docker Compose
+
+**O que faz:** expoe o endpoint publico `GET /saude` (sem exigir JWT nem `x-token-interno`) em
+todas as 3 agencias (`agencia/src/controllers/status_controller.py`), retornando:
+```json
+{"status": "ok", "idAgencia": 0, "liderAtual": 2}
+```
+E configura a diretiva `healthcheck` em cada servico (`agencia-0`, `agencia-1` e `agencia-2`) no
+`docker-compose.yml`:
+```yaml
+healthcheck:
+  test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://localhost:4046/saude', timeout=2)"]
+  interval: 10s
+  timeout: 3s
+  retries: 3
+  start_period: 5s
+```
+
+**Por que foi escolhida:** sem `healthcheck`, o `docker compose ps` mostra apenas `Up X minutes`
+(indicando que o processo PID 1 existe), mesmo que o servidor HTTP Uvicorn esteja travado em
+deadlock. Com o `healthcheck` batendo em `GET /saude`, o Docker valida ativamente a pilha HTTP da
+agencia a cada 10 segundos e exibe o status **`Up X minutes (healthy)`** no `docker compose ps`.
+Usamos `urllib.request` da biblioteca padrao do Python para funcionar na imagem enxuta
+`python:3.11-slim` sem precisar instalar `curl` ou `wget` via `apt`.
+
+**Evidencia:** `evidencias/sprint4/funcionalidade-adicional.png`
+
+---
